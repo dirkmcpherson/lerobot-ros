@@ -168,8 +168,9 @@ class ROS2Robot(Robot):
             joint_positions = [action[joint + ".pos"] for joint in self.config.ros2_interface.arm_joint_names]
             self.ros2_interface.send_joint_position_command(joint_positions)
 
-        gripper_pos = action["gripper.pos"]
-        self.ros2_interface.send_gripper_command(gripper_pos)
+        if "gripper.pos" in action:
+            gripper_pos = action["gripper.pos"]
+            self.ros2_interface.send_gripper_command(gripper_pos)
         return action
 
     def disconnect(self):

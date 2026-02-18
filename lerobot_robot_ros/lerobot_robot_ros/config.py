@@ -63,6 +63,12 @@ class ROS2InterfaceConfig:
 
     gripper_action_type: GripperActionType = GripperActionType.TRAJECTORY
 
+    # Topic names for control
+    arm_topic: str = "/arm_controller/joint_trajectory"
+    gripper_topic: str = "/gripper_controller/gripper_cmd"
+    position_topic: str = "/position_controller/commands"
+    gripper_traj_topic: str = "/gripper_controller/joint_trajectory"
+
 
 @dataclass
 class ROS2Config(RobotConfig):

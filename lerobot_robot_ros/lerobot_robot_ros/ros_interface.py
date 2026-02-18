@@ -17,6 +17,7 @@ import threading
 import time
 
 import rclpy
+from builtin_interfaces.msg import Duration
 from control_msgs.action import GripperCommand
 from lerobot.utils.errors import DeviceNotConnectedError
 from rclpy.action import ActionClient
@@ -73,11 +74,11 @@ class ROS2Interface:
         self.robot_node = Node("moveit2_interface_node", namespace=self.config.namespace)
         if self.action_type == ActionType.JOINT_POSITION:
             self.pos_cmd_pub = self.robot_node.create_publisher(
-                Float64MultiArray, "/position_controller/commands", 10
+                Float64MultiArray, self.config.position_topic, 10
             )
         elif self.action_type == ActionType.JOINT_TRAJECTORY:
             self.traj_cmd_pub = self.robot_node.create_publisher(
-                JointTrajectory, "/arm_controller/joint_trajectory", 10
+                JointTrajectory, self.config.arm_topic, 10
             )
         elif self.action_type == ActionType.CARTESIAN_VELOCITY:
             self.moveit2_servo = MoveIt2Servo(
@@ -88,13 +89,13 @@ class ROS2Interface:
 
         if self.config.gripper_action_type == GripperActionType.TRAJECTORY:
             self.gripper_traj_pub = self.robot_node.create_publisher(
-                JointTrajectory, "/gripper_controller/joint_trajectory", 10
+                JointTrajectory, self.config.gripper_traj_topic, 10
             )
         else:
             self.gripper_action_client = ActionClient(
                 self.robot_node,
                 GripperCommand,
-                "/gripper_controller/gripper_cmd",
+                self.config.gripper_topic,
                 callback_group=ReentrantCallbackGroup(),
             )
             self._goal_msg = GripperCommand.Goal()
@@ -115,7 +116,9 @@ class ROS2Interface:
 
         self.is_connected = True
 
-    def send_joint_position_command(self, joint_positions: list[float], unnormalize: bool = True) -> None:
+    def send_joint_position_command(
+        self, joint_positions: list[float], unnormalize: bool = True, time_from_start_sec: float = 1.0
+    ) -> None:
         """
         Send a command to the robot's joints.
         Args:
@@ -152,6 +155,9 @@ class ROS2Interface:
             msg.joint_names = self.config.arm_joint_names
             point = JointTrajectoryPoint()
             point.positions = joint_positions
+            sec = int(time_from_start_sec)
+            nanosec = int((time_from_start_sec - sec) * 1e9)
+            point.time_from_start = Duration(sec=sec, nanosec=nanosec)
             msg.points = [point]
             self.traj_cmd_pub.publish(msg)
         else:
