@@ -16,4 +16,4 @@ python ./eval_kinova_reach.py
 
 
 ## for teleop collection, you need to move the urdf file locally (or specify its location). There's notes about this in user_input spacemouse.py
-TODO
+python record_kinova_data_teleoperated.py --input spacemouse --urdf /tmp/gen3.urdf
