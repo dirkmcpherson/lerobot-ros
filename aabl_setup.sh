@@ -12,3 +12,8 @@ bash train_kinova_reach.sh
 # evaluate the trained policy
 python ./eval_kinova_reach.py
 
+
+
+
+## for teleop collection, you need to move the urdf file locally (or specify its location). There's notes about this in user_input spacemouse.py
+TODO

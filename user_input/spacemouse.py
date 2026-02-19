@@ -7,10 +7,10 @@ Cartesian velocity into joint-space position targets, keeping the UserInput
 interface consistent with other devices.
 
 At each control step:
-  1. Read spacemouse state (non-blocking).
-  2. Apply dead-zone and scale to a 6-D Cartesian velocity vector (m/s, rad/s).
+  1. Read spacemouse state (non-blocking via pyspacemouse.check()).
+  2. Apply dead-zone (on raw axes) then scale to a 6-D Cartesian velocity (m/s, rad/s).
   3. Compute the geometric Jacobian J at the current joint configuration using
-     PyKDL and the robot URDF.
+     pinocchio and the robot URDF.
   4. Solve dq = pinv(J) · v_cart  (minimum-norm joint velocity).
   5. Integrate: target = current_positions + dq * dt.
   6. Clamp targets to joint limits.
@@ -37,7 +37,27 @@ base_link       : Root link of the kinematic chain (default: "base_link")
 ee_link         : End-effector link (default: "tool_frame" for Kinova Gen3)
 linear_scale    : Max end-effector linear velocity, m/s (default: 0.1)
 angular_scale   : Max end-effector angular velocity, rad/s (default: 0.5)
-dead_zone       : Fractional axis dead-zone [0, 1] (default: 0.05)
+dead_zone       : Fractional dead-zone on raw [-1,1] axes (default: 0.05)
+
+Adding gripper control later
+-----------------------------
+The differential IK only controls arm joints; the gripper is independent and
+does not affect end-effector pose, so no IK changes are needed. To add it:
+
+1. Pass gripper_joint_name (e.g. "finger_joint") and its limits to __init__.
+   Store gripper_position internally, initialise from reset().
+
+2. In get_action():
+   - Map a button or spare axis to gripper open/close increments.
+   - Append the gripper position to self._targets before returning.
+
+3. In record_kinova_data_teleoperated.py:
+   - Add "finger_joint" to arm_joint_names in KinovaGen3Config (or keep separate).
+   - Set gripper_joint_name in ROS2InterfaceConfig and switch GripperActionType as needed.
+   - The dataset features shape will grow from (7,) to (8,) — update accordingly.
+
+The gripper joint is NOT part of the pinocchio kinematic chain for IK purposes;
+just treat its position as a separate scalar that you accumulate and clamp.
 """
 
 import logging
@@ -82,8 +102,11 @@ class SpacemouseUserInput(UserInput):
         self._pin_model = None  # pinocchio model, created in connect()
         self._pin_data = None
         self._ee_frame_id: int = -1
-        self._device = None   # pyspacemouse device, opened in connect()
+        self._latest_state = None  # latest HID event, written by reader thread
         self._device_cm = None
+        self._device = None
+        self._stop_reader: bool = False
+        self._reader_thread: Optional[threading.Thread] = None
 
         self._end: bool = False
         self._discard: bool = False
@@ -110,21 +133,44 @@ class SpacemouseUserInput(UserInput):
 
         self._setup_kdl()
 
-        # Enter the context manager manually so connect/disconnect can be
-        # separate calls while still getting proper cleanup via __exit__.
+        # Open device using the confirmed context-manager pattern.
         self._device_cm = pyspacemouse.open()
         self._device = self._device_cm.__enter__()
         if self._device is None:
             raise RuntimeError(
                 "No SpaceMouse device found. Check USB connection and udev rules."
             )
+
+        # Spin a background thread so device.read() (blocking) never stalls
+        # the control loop. get_action() reads _latest_state without blocking.
+        self._stop_reader = False
+        self._reader_thread = threading.Thread(
+            target=self._reader_loop, daemon=True, name="spacemouse-reader"
+        )
+        self._reader_thread.start()
+
         self._last_time = time.perf_counter()
         logger.info(
             "SpaceMouse connected (end-effector Cartesian control via differential IK). "
             "Left=save | Right=discard | Both=quit"
         )
 
+    def _reader_loop(self) -> None:
+        """Background thread: blocks on device.read() and caches latest state."""
+        while not self._stop_reader:
+            try:
+                state = self._device.read()
+                if state is not None:
+                    with self._lock:
+                        self._latest_state = state
+            except Exception:
+                break
+
     def disconnect(self) -> None:
+        self._stop_reader = True
+        if self._reader_thread is not None:
+            self._reader_thread.join(timeout=2.0)
+            self._reader_thread = None
         if self._device_cm is not None:
             try:
                 self._device_cm.__exit__(None, None, None)
@@ -150,18 +196,22 @@ class SpacemouseUserInput(UserInput):
         dt = now - self._last_time
         self._last_time = now
 
-        state = self._device.read()
-
         with self._lock:
+            # Snapshot latest state from the background thread (non-blocking).
+            state = self._latest_state
+            self._latest_state = None  # consume so we don't re-process same event
             if state is not None:
                 # --- Cartesian velocity from spacemouse ---
                 axes = np.array([state.x, state.y, state.z,
                                   state.roll, state.pitch, state.yaw])
+
+                # Dead-zone applied to raw [-1, 1] axes BEFORE scaling.
+                # Applying it after scaling (old behaviour) made the effective dead zone
+                # 50% of the linear range (0.05 / 0.1 m/s max), causing huge input lag.
+                axes[np.abs(axes) < self._dead_zone] = 0.0
+
                 axes[:3] *= self._linear_scale
                 axes[3:] *= self._angular_scale
-
-                # Dead-zone: zero out small inputs to avoid drift
-                axes[np.abs(axes) < self._dead_zone] = 0.0
 
                 if np.any(axes != 0.0):
                     # --- Differential IK ---
@@ -212,10 +262,13 @@ class SpacemouseUserInput(UserInput):
             )
         self._ee_frame_id = self._pin_model.getFrameId(self._ee_link)
 
-        # Map each arm joint name to its index in pinocchio's q vector.
-        # The URDF may contain extra joints (gripper, tool, etc.) so nq > len(joint_names).
-        # We fill a full q vector of size nq and extract the matching Jacobian columns.
-        self._q_indices: list[int] = []
+        # Map each arm joint name to its indices in pinocchio's q and v vectors.
+        # URDF "continuous" joints use SO(2) representation: nq=2 (cos,sin), nv=1.
+        # The Jacobian has shape (6, nv), so Jacobian columns must be indexed by
+        # idx_v, while the configuration vector q is indexed by idx_q.
+        self._q_indices: list[int] = []   # start index in q (configuration)
+        self._v_indices: list[int] = []   # index in v (velocity / Jacobian columns)
+        self._is_continuous: list[bool] = []  # True for unbounded revolute joints
         for name in self._names:
             if not self._pin_model.existJointName(name):
                 raise RuntimeError(
@@ -223,11 +276,16 @@ class SpacemouseUserInput(UserInput):
                     f"Available joints: {[self._pin_model.names[i] for i in range(self._pin_model.njoints)]}"
                 )
             jid = self._pin_model.getJointId(name)
-            self._q_indices.append(self._pin_model.joints[jid].idx_q)
+            joint = self._pin_model.joints[jid]
+            self._q_indices.append(joint.idx_q)
+            self._v_indices.append(joint.idx_v)
+            # Continuous (unbounded revolute) joints have nq=2, nv=1
+            self._is_continuous.append(joint.nq == 2)
 
         logger.info(
-            f"Pinocchio model loaded: nq={self._pin_model.nq}, "
-            f"controlling {len(self._names)} arm joints at q indices {self._q_indices}, "
+            f"Pinocchio model loaded: nq={self._pin_model.nq}, nv={self._pin_model.nv}, "
+            f"controlling {len(self._names)} arm joints, "
+            f"v indices {self._v_indices}, "
             f"end-effector frame '{self._ee_link}' (id={self._ee_frame_id})"
         )
 
@@ -237,10 +295,14 @@ class SpacemouseUserInput(UserInput):
         import pinocchio as pin
 
         # Build a full configuration vector (size nq), neutral everywhere except
-        # for our arm joints which are set to the current positions.
+        # for our arm joints. Continuous joints use SO(2): q[idx_q]=(cos θ, sin θ).
         q = pin.neutral(self._pin_model)
-        for idx_q, pos in zip(self._q_indices, joint_positions):
-            q[idx_q] = pos
+        for idx_q, pos, continuous in zip(self._q_indices, joint_positions, self._is_continuous):
+            if continuous:
+                q[idx_q]     = np.cos(pos)
+                q[idx_q + 1] = np.sin(pos)
+            else:
+                q[idx_q] = pos
 
         pin.computeJointJacobians(self._pin_model, self._pin_data, q)
         J_full = pin.getFrameJacobian(
@@ -249,8 +311,8 @@ class SpacemouseUserInput(UserInput):
             self._ee_frame_id,
             pin.ReferenceFrame.LOCAL_WORLD_ALIGNED,
         )
-        # Extract only the columns for our controlled joints (6 × n_arm_joints)
-        return J_full[:, self._q_indices]
+        # Extract arm-joint columns using v-vector indices (Jacobian is 6 × nv)
+        return J_full[:, self._v_indices]
 
     # ------------------------------------------------------------------
     # Button handling (called inside self._lock)
