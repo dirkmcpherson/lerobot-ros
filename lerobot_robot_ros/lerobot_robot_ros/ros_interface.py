@@ -114,6 +114,15 @@ class ROS2Interface:
         self.executor_thread.start()
         time.sleep(3)  # Give some time to connect to services and receive messages
 
+        if self.gripper_action_client is not None:
+            if not self.gripper_action_client.wait_for_server(timeout_sec=5.0):
+                logger.warning(
+                    "Gripper action server not available after 5s. "
+                    "Gripper commands will be skipped."
+                )
+            else:
+                logger.info("Gripper action server connected.")
+
         self.is_connected = True
 
     def send_joint_position_command(
@@ -209,8 +218,8 @@ class ROS2Interface:
             if not self.gripper_action_client:
                 raise DeviceNotConnectedError("Gripper action client is not initialized.")
 
-            if not self.gripper_action_client.wait_for_server(timeout_sec=1.0):
-                logger.error("Gripper action server not available")
+            if not self.gripper_action_client.server_is_ready():
+                logger.warning("Gripper action server not available, skipping command.")
                 return False
 
             self._goal_msg.command.position = float(gripper_goal)

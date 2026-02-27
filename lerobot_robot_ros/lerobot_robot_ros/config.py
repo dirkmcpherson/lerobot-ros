@@ -127,3 +127,50 @@ class SO101ROSConfig(ROS2Config):
             gripper_close_position=0.0,
         ),
     )
+
+@dataclass
+class KinovaGen3Config(ROS2Config):
+    """Kinova Gen3 7-DOF arm (no gripper)."""
+    action_type: ActionType = ActionType.JOINT_TRAJECTORY
+
+    ros2_interface: ROS2InterfaceConfig = field(
+        default_factory=lambda: ROS2InterfaceConfig(
+            arm_joint_names=[
+                "joint_1", "joint_2", "joint_3", "joint_4",
+                "joint_5", "joint_6", "joint_7",
+            ],
+            gripper_joint_name=None,
+            namespace="",
+            arm_topic="/joint_trajectory_controller/joint_trajectory",
+            min_joint_positions=[-6.2832, -2.24, -6.2832, -2.57, -6.2832, -2.09, -6.2832],
+            max_joint_positions=[6.2832, 2.24, 6.2832, 2.57, 6.2832, 2.09, 6.2832],
+            gripper_open_position=0.0,
+            gripper_close_position=0.8,
+            gripper_action_type=GripperActionType.ACTION,
+        )
+    )
+
+
+@dataclass
+class KinovaGen3LiteConfig(ROS2Config):
+    """Kinova Gen3 Lite 6-DOF arm + integrated 2-finger gripper."""
+    action_type: ActionType = ActionType.JOINT_TRAJECTORY
+
+    ros2_interface: ROS2InterfaceConfig = field(
+        default_factory=lambda: ROS2InterfaceConfig(
+            arm_joint_names=[
+                "joint_1", "joint_2", "joint_3",
+                "joint_4", "joint_5", "joint_6",
+            ],
+            gripper_joint_name="right_finger_bottom_joint",
+            namespace="",
+            arm_topic="/joint_trajectory_controller/joint_trajectory",
+            gripper_topic="/gen3_lite_2f_gripper_controller/gripper_cmd",
+            min_joint_positions=[-2.68, -2.61, -2.61, -2.6, -2.53, -2.6],
+            max_joint_positions=[2.68, 2.61, 2.61, 2.6, 2.53, 2.6],
+            gripper_open_position=0.0,
+            gripper_close_position=0.85,
+            gripper_action_type=GripperActionType.ACTION,
+        )
+    )
+

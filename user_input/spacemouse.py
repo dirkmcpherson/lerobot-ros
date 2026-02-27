@@ -7,7 +7,7 @@ Cartesian velocity into joint-space position targets, keeping the UserInput
 interface consistent with other devices.
 
 At each control step:
-  1. Read spacemouse state (non-blocking via pyspacemouse.check()).
+  1. Read spacemouse state (non-blocking via background thread caching device.read()).
   2. Apply dead-zone (on raw axes) then scale to a 6-D Cartesian velocity (m/s, rad/s).
   3. Compute the geometric Jacobian J at the current joint configuration using
      pinocchio and the robot URDF.
@@ -15,11 +15,25 @@ At each control step:
   5. Integrate: target = current_positions + dq * dt.
   6. Clamp targets to joint limits.
 
-Buttons
--------
+Buttons (no gripper configured)
+--------------------------------
 Left  (button 0)   Save episode
 Right (button 1)   Discard episode
 Both simultaneously Quit recording
+
+Buttons (gripper configured)
+-----------------------------
+Left  (button 0)   Save episode
+Right (button 1)   Toggle gripper open/closed
+Both simultaneously Discard episode and quit recording
+
+Gripper
+-------
+Pass gripper_joint_name, gripper_open_position, and gripper_closed_position to
+enable gripper control. The gripper is NOT part of the pinocchio IK chain; its
+position is tracked separately and exposed via the gripper_position property.
+get_action() still returns only arm joint positions; the caller reads
+user_input.gripper_position and sends it via send_gripper_command() separately.
 
 Requirements
 ------------
@@ -28,36 +42,15 @@ Requirements
 
 Parameters
 ----------
-urdf_path       : Path to the processed robot URDF file.
-                  Generate with:
-                  source <ws>/install/setup.bash
-                  xacro <ws>/src/ros2_kortex/kortex_description/robots/gen3.xacro \
-                      dof:=7 vision:=false > /tmp/gen3.urdf
-base_link       : Root link of the kinematic chain (default: "base_link")
-ee_link         : End-effector link (default: "tool_frame" for Kinova Gen3)
-linear_scale    : Max end-effector linear velocity, m/s (default: 0.1)
-angular_scale   : Max end-effector angular velocity, rad/s (default: 0.5)
-dead_zone       : Fractional dead-zone on raw [-1,1] axes (default: 0.05)
-
-Adding gripper control later
------------------------------
-The differential IK only controls arm joints; the gripper is independent and
-does not affect end-effector pose, so no IK changes are needed. To add it:
-
-1. Pass gripper_joint_name (e.g. "finger_joint") and its limits to __init__.
-   Store gripper_position internally, initialise from reset().
-
-2. In get_action():
-   - Map a button or spare axis to gripper open/close increments.
-   - Append the gripper position to self._targets before returning.
-
-3. In record_kinova_data_teleoperated.py:
-   - Add "finger_joint" to arm_joint_names in KinovaGen3Config (or keep separate).
-   - Set gripper_joint_name in ROS2InterfaceConfig and switch GripperActionType as needed.
-   - The dataset features shape will grow from (7,) to (8,) — update accordingly.
-
-The gripper joint is NOT part of the pinocchio kinematic chain for IK purposes;
-just treat its position as a separate scalar that you accumulate and clamp.
+urdf_path            : Path to the processed robot URDF file.
+base_link            : Root link of the kinematic chain (default: "base_link")
+ee_link              : End-effector link (default: "tool_frame" for Kinova Gen3)
+linear_scale         : Max end-effector linear velocity, m/s (default: 0.1)
+angular_scale        : Max end-effector angular velocity, rad/s (default: 0.5)
+dead_zone            : Fractional dead-zone on raw [-1,1] axes (default: 0.05)
+gripper_joint_name   : Joint name of the gripper, or None to disable (default: None)
+gripper_open_position : Gripper joint position when fully open (default: 0.0)
+gripper_closed_position : Gripper joint position when fully closed (default: 0.85)
 """
 
 import logging
@@ -85,6 +78,9 @@ class SpacemouseUserInput(UserInput):
         linear_scale: float = 0.1,
         angular_scale: float = 0.5,
         dead_zone: float = 0.05,
+        gripper_joint_name: Optional[str] = None,
+        gripper_open_position: float = 0.0,
+        gripper_closed_position: float = 0.85,
     ):
         self._names = joint_names
         self._min = np.array(min_joint_positions)
@@ -96,6 +92,12 @@ class SpacemouseUserInput(UserInput):
         self._angular_scale = angular_scale
         self._dead_zone = dead_zone
         self._n = len(joint_names)
+
+        self._gripper_joint_name = gripper_joint_name
+        self._gripper_open_position = gripper_open_position
+        self._gripper_closed_position = gripper_closed_position
+        self._gripper_is_open: bool = True
+        self._gripper_position: float = gripper_open_position
 
         self._targets: np.ndarray = np.zeros(self._n)
         self._last_time: float = time.perf_counter()
@@ -183,6 +185,12 @@ class SpacemouseUserInput(UserInput):
     # UserInput interface
     # ------------------------------------------------------------------
 
+    @property
+    def gripper_position(self) -> float:
+        """Current gripper position target (only meaningful when gripper is configured)."""
+        with self._lock:
+            return self._gripper_position
+
     def reset(self, current_positions: list[float]) -> None:
         with self._lock:
             self._targets = np.array(current_positions, dtype=float)
@@ -190,6 +198,8 @@ class SpacemouseUserInput(UserInput):
             self._end = False
             self._discard = False
             self._prev_buttons = [0, 0]
+            self._gripper_is_open = True
+            self._gripper_position = self._gripper_open_position
 
     def get_action(self, current_positions: list[float]) -> list[float]:
         now = time.perf_counter()
@@ -326,16 +336,36 @@ class SpacemouseUserInput(UserInput):
         right_pressed = b[1] and not prev[1]
         both_held     = b[0] and b[1]
 
-        if both_held:
-            logger.info("Both buttons — quit requested.")
-            self._quit = True
-            self._end = True
-        elif left_pressed:
-            logger.info("Left button — save episode.")
-            self._end = True
-        elif right_pressed:
-            logger.info("Right button — discard episode.")
-            self._discard = True
-            self._end = True
+        if self._gripper_joint_name is not None:
+            # Gripper mode: right button toggles gripper; both = discard + quit
+            if both_held:
+                logger.info("Both buttons — discard and quit.")
+                self._discard = True
+                self._quit = True
+                self._end = True
+            elif left_pressed:
+                logger.info("Left button — save episode.")
+                self._end = True
+            elif right_pressed:
+                self._gripper_is_open = not self._gripper_is_open
+                self._gripper_position = (
+                    self._gripper_open_position if self._gripper_is_open
+                    else self._gripper_closed_position
+                )
+                state = "open" if self._gripper_is_open else "closed"
+                logger.info(f"Right button — gripper {state} ({self._gripper_position:.3f}).")
+        else:
+            # No gripper: original mapping (left=save, right=discard, both=quit)
+            if both_held:
+                logger.info("Both buttons — quit requested.")
+                self._quit = True
+                self._end = True
+            elif left_pressed:
+                logger.info("Left button — save episode.")
+                self._end = True
+            elif right_pressed:
+                logger.info("Right button — discard episode.")
+                self._discard = True
+                self._end = True
 
         self._prev_buttons = [b[0], b[1]]

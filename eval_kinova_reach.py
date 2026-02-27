@@ -3,13 +3,12 @@ import logging
 import torch
 import numpy as np
 from pathlib import Path
-from dataclasses import dataclass, field
 
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.processor.pipeline import PolicyProcessorPipeline
 from lerobot.utils.utils import init_logging
 
-from lerobot_robot_ros.config import ROS2Config, ROS2InterfaceConfig, ActionType, GripperActionType
+from lerobot_robot_ros.config import KinovaGen3Config
 from lerobot_robot_ros.robot import ROS2Robot
 
 init_logging()
@@ -23,28 +22,6 @@ CHECKPOINT_PATH = Path("outputs/train/kinova_reach/checkpoints/last/pretrained_m
 EVAL_DURATION_SEC = 30.0
 HOME_SETTLE_SEC = 6.0
 FPS = 10
-
-
-@dataclass
-class KinovaGen3Config(ROS2Config):
-    action_type: ActionType = ActionType.JOINT_TRAJECTORY
-
-    ros2_interface: ROS2InterfaceConfig = field(
-        default_factory=lambda: ROS2InterfaceConfig(
-            arm_joint_names=[
-                "joint_1", "joint_2", "joint_3", "joint_4",
-                "joint_5", "joint_6", "joint_7"
-            ],
-            gripper_joint_name=None,
-            namespace="",
-            arm_topic="/joint_trajectory_controller/joint_trajectory",
-            min_joint_positions=[-6.2832, -2.24, -6.2832, -2.57, -6.2832, -2.09, -6.2832],
-            max_joint_positions=[6.2832, 2.24, 6.2832, 2.57, 6.2832, 2.09, 6.2832],
-            gripper_open_position=0.0,
-            gripper_close_position=0.8,
-            gripper_action_type=GripperActionType.ACTION,
-        )
-    )
 
 
 def reset_to_home(robot: ROS2Robot, joint_names: list[str]) -> None:

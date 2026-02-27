@@ -1,6 +1,7 @@
 
 # Bring up gazebo control for a simualted kinova arm WITHOUT a gripper
-ros2 launch kortex_bringup kortex_sim_control.launch.py   use_sim_time:=true   launch_rviz:=false
+# ros2 launch kortex_bringup kortex_sim_control.launch.py   use_sim_time:=true   launch_rviz:=false
+ros2 launch kortex_bringup kortex_sim_control.launch.py   use_sim_time:=true   launch_rviz:=false robot_type:=gen3_lite dof:=6 gripper:=gen3_lite_2f
 
 # EXAMPLE POINT TASK TRAINED WITH DIFFUSION
 # generate a bunch of pointing data into the lerobot format
