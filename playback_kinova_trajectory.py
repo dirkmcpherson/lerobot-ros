@@ -13,15 +13,14 @@ The script:
 import argparse
 import logging
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from lerobot.utils.utils import init_logging
-from lerobot_robot_ros.config import ActionType, GripperActionType, ROS2Config, ROS2InterfaceConfig
-from lerobot_robot_ros.robot import ROS2Robot
+from lerobot_backends import BackendRobot
+from lerobot_backends.ros2.config import KinovaGen3Config
 
 init_logging()
 logger = logging.getLogger(__name__)
@@ -32,28 +31,6 @@ HOME_POSITION = [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
 DATASET_ROOT = Path("data/lerobot/kinova_gen3_reach")
 FPS = 10
 SETTLE_SEC = 6.0  # Time to wait after moving to start position
-
-
-@dataclass
-class KinovaGen3Config(ROS2Config):
-    action_type: ActionType = ActionType.JOINT_TRAJECTORY
-
-    ros2_interface: ROS2InterfaceConfig = field(
-        default_factory=lambda: ROS2InterfaceConfig(
-            arm_joint_names=[
-                "joint_1", "joint_2", "joint_3", "joint_4",
-                "joint_5", "joint_6", "joint_7",
-            ],
-            gripper_joint_name=None,
-            namespace="",
-            arm_topic="/joint_trajectory_controller/joint_trajectory",
-            min_joint_positions=[-6.2832, -2.24, -6.2832, -2.57, -6.2832, -2.09, -6.2832],
-            max_joint_positions=[6.2832, 2.24, 6.2832, 2.57, 6.2832, 2.09, 6.2832],
-            gripper_open_position=0.0,
-            gripper_close_position=0.8,
-            gripper_action_type=GripperActionType.ACTION,
-        )
-    )
 
 
 def load_episode(dataset_root: Path, episode_index: int) -> pd.DataFrame:
@@ -73,7 +50,7 @@ def load_episode(dataset_root: Path, episode_index: int) -> pd.DataFrame:
     if not frames:
         raise ValueError(
             f"Episode {episode_index} not found in dataset. "
-            f"Available episodes: 0–{df['episode_index'].max()}"
+            f"Available episodes: 0-{df['episode_index'].max()}"
         )
 
     episode_df = pd.concat(frames).sort_values("frame_index").reset_index(drop=True)
@@ -86,20 +63,10 @@ def get_start_position(episode_df: pd.DataFrame) -> list[float]:
     first_row = episode_df.iloc[0]
     if "observation.state" in episode_df.columns:
         state = first_row["observation.state"]
-        # Parquet stores the array; it may come back as a list or numpy array
         if state is not None and len(state) > 0:
             return list(float(v) for v in state)
-    logger.warning("observation.state not found in dataset — using HOME_POSITION as start.")
+    logger.warning("observation.state not found in dataset -- using HOME_POSITION as start.")
     return HOME_POSITION
-
-
-def move_to_position(robot: ROS2Robot, position: list[float], label: str) -> None:
-    """Command the robot to a position and wait for it to settle."""
-    logger.info(f"Moving to {label}: {[f'{v:.3f}' for v in position]}")
-    robot.ros2_interface.send_joint_position_command(
-        position, unnormalize=False, time_from_start_sec=5.0
-    )
-    time.sleep(SETTLE_SEC)
 
 
 def main():
@@ -120,10 +87,12 @@ def main():
     source = "dataset first frame" if start_position != HOME_POSITION else "HOME_POSITION (fallback)"
     logger.info(f"Start position source: {source}")
 
-    # Connect robot
+    # Connect robot via backend
     logger.info("Connecting to robot...")
     config = KinovaGen3Config()
-    robot = ROS2Robot(config)
+    config.home_position = start_position
+    config.home_settle_sec = SETTLE_SEC
+    robot = BackendRobot(config)
     robot.connect()
     time.sleep(2.0)
 
@@ -133,8 +102,9 @@ def main():
     joint_names = config.ros2_interface.arm_joint_names
 
     try:
-        # Move to start
-        move_to_position(robot, start_position, "start position")
+        # Move to start via backend reset
+        logger.info(f"Moving to start position: {[f'{v:.3f}' for v in start_position]}")
+        robot.backend.reset()
 
         # Play back actions
         logger.info(f"Playing back {len(episode_df)} frames at {FPS} FPS...")

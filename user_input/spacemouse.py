@@ -75,8 +75,8 @@ class SpacemouseUserInput(UserInput):
         urdf_path: str,
         base_link: str = "base_link",
         ee_link: str = "tool_frame",
-        linear_scale: float = 0.1,
-        angular_scale: float = 0.5,
+        linear_scale: float = 0.5,
+        angular_scale: float = 1.5,
         dead_zone: float = 0.05,
         gripper_joint_name: Optional[str] = None,
         gripper_open_position: float = 0.0,
@@ -105,6 +105,7 @@ class SpacemouseUserInput(UserInput):
         self._pin_data = None
         self._ee_frame_id: int = -1
         self._latest_state = None  # latest HID event, written by reader thread
+        self._pending_buttons: list[int] | None = None  # button press not yet consumed
         self._device_cm = None
         self._device = None
         self._stop_reader: bool = False
@@ -158,13 +159,23 @@ class SpacemouseUserInput(UserInput):
         )
 
     def _reader_loop(self) -> None:
-        """Background thread: blocks on device.read() and caches latest state."""
+        """Background thread: blocks on device.read() and caches latest state.
+
+        Button presses are latched separately so they can't be overwritten
+        by a subsequent read before get_action() consumes them.
+        """
         while not self._stop_reader:
             try:
                 state = self._device.read()
                 if state is not None:
                     with self._lock:
                         self._latest_state = state
+                        # Latch any non-zero button state so it survives until
+                        # get_action() processes it (reader runs much faster
+                        # than the control loop).
+                        btns = list(state.buttons) + [0, 0]
+                        if btns[0] or btns[1]:
+                            self._pending_buttons = btns[:2]
             except Exception:
                 break
 
@@ -198,6 +209,7 @@ class SpacemouseUserInput(UserInput):
             self._end = False
             self._discard = False
             self._prev_buttons = [0, 0]
+            self._pending_buttons = None
             self._gripper_is_open = True
             self._gripper_position = self._gripper_open_position
 
@@ -212,12 +224,14 @@ class SpacemouseUserInput(UserInput):
             self._latest_state = None  # consume so we don't re-process same event
             if state is not None:
                 # --- Cartesian velocity from spacemouse ---
-                axes = np.array([state.x, state.y, state.z,
-                                  state.roll, state.pitch, state.yaw])
+                # Spacemouse physical axes → robot base frame:
+                #   spacemouse forward (x) → robot +y
+                #   spacemouse right   (y) → robot +x
+                #   spacemouse up      (z) → robot +z
+                axes = np.array([state.y, state.x, state.z,
+                                  state.pitch, state.roll, state.yaw])
 
                 # Dead-zone applied to raw [-1, 1] axes BEFORE scaling.
-                # Applying it after scaling (old behaviour) made the effective dead zone
-                # 50% of the linear range (0.05 / 0.1 m/s max), causing huge input lag.
                 axes[np.abs(axes) < self._dead_zone] = 0.0
 
                 axes[:3] *= self._linear_scale
@@ -234,7 +248,10 @@ class SpacemouseUserInput(UserInput):
                     new_targets = np.array(current_positions) + dq * dt
                     self._targets = np.clip(new_targets, self._min, self._max)
 
-                self._handle_buttons(state.buttons)
+            # Process latched button presses (survives reader overwrite race)
+            if self._pending_buttons is not None:
+                self._handle_buttons(self._pending_buttons)
+                self._pending_buttons = None
 
             return self._targets.tolist()
 

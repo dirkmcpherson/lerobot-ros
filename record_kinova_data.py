@@ -8,22 +8,16 @@ from pathlib import Path
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.utils.utils import init_logging
 
-# ROS wrapper imports
-from lerobot_robot_ros.config import KinovaGen3Config
-from lerobot_robot_ros.robot import ROS2Robot
+# Backend imports
+from lerobot_backends import BackendRobot
+from lerobot_backends.ros2.config import KinovaGen3Config
 
 # Configure logging
 init_logging()
 logger = logging.getLogger(__name__)
 
 # --- Task Definition ---
-# Home: MoveIt named "home" for Gen3 7DOF
 HOME_POSITION = [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
-
-# Target: arm nearly fully extended, pointing down and to the left.
-# joint_1 rotated ~90° left, shoulder/elbow configured to point arm downward.
-# NOTE: Verify these angles match the desired pose on the physical robot before
-# running full data collection. Adjust as needed.
 TARGET_POSITION = [1.57, 2.0, 3.14, -0.5, 0.0, 0.0, 1.57]
 
 # --- Dataset Config ---
@@ -32,26 +26,15 @@ ROOT_DIR = Path("data/lerobot/kinova_gen3_reach")
 FPS = 10
 NUM_EPISODES = 50
 EPISODE_LENGTH_FRAMES = 100  # 10 seconds at 10 FPS
-HOME_SETTLE_SEC = 6.0        # Time to wait after commanding home position
 ROBOT_TYPE = "kinova_gen3"
-
-
-def reset_to_home(robot: ROS2Robot, joint_names: list[str]) -> None:
-    """Command the robot to move to the home position and wait for it to settle."""
-    logger.info(f"Resetting to home: {HOME_POSITION}")
-    robot.ros2_interface.send_joint_position_command(
-        HOME_POSITION, unnormalize=False, time_from_start_sec=5.0
-    )
-    time.sleep(HOME_SETTLE_SEC)
-    obs = robot.get_observation()
-    current = [obs[f"{j}.pos"] for j in joint_names]
-    logger.info(f"At home (actual): {[f'{v:.3f}' for v in current]}")
 
 
 def main():
     logger.info("Initializing Robot...")
     config = KinovaGen3Config()
-    robot = ROS2Robot(config)
+    # Override home_position to match this script's task
+    config.home_position = HOME_POSITION
+    robot = BackendRobot(config)
     robot.connect()
     time.sleep(2.0)
 
@@ -64,8 +47,6 @@ def main():
             "shape": (num_joints,),
             "names": joint_names,
         },
-        # Kept for future goal-conditioned policy training.
-        # For this fixed task the target is always TARGET_POSITION.
         "observation.environment_state": {
             "dtype": "float32",
             "shape": (num_joints,),
@@ -95,7 +76,7 @@ def main():
     try:
         for ep_idx in range(NUM_EPISODES):
             logger.info(f"Episode {ep_idx + 1}/{NUM_EPISODES}: resetting to home...")
-            reset_to_home(robot, joint_names)
+            robot.backend.reset()
 
             # Build a linear trajectory from home to target over the episode
             trajectory = np.linspace(HOME_POSITION, TARGET_POSITION, EPISODE_LENGTH_FRAMES)
@@ -116,8 +97,6 @@ def main():
                 # Action: next waypoint along the interpolated trajectory
                 action_vec = trajectory[min(i + 1, EPISODE_LENGTH_FRAMES - 1)].astype(np.float32)
 
-                # Send at 10 FPS cadence (0.1 s per step → controller reaches each
-                # waypoint before the next one arrives)
                 action_dict = {f"{name}.pos": val for name, val in zip(joint_names, action_vec)}
                 robot.send_action(action_dict)
 
