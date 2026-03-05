@@ -6,6 +6,8 @@ ros2 launch kortex_bringup kortex_sim_control.launch.py   use_sim_time:=true   l
 
 # We modified the launch file to hardcode in some task cubes to mess with. Here's a command to copy that file into "forked_kortex" in case our work gets blown away
 cp ~/workspace/ros2_kortex_ws/src/ros2_kortex/kortex_bringup/launch/kortex_sim_control.launch.py ./forked_cortex
+cp ~/workspace/ros2_kortex_ws/src/ros2_kortex/kortex_description/arms/gen3_lite/6dof/urdf/kortex.ros2_control.xacro ./forked_cortex
+cp ~/workspace/ros2_kortex_ws/src/ros2_kortex/kortex_description/grippers/gen3_lite_2f/urdf/gen3_lite_2f_macro.xacro ./forked_cortex
 
 # here's how you build just the bringup package with colcon so your urdf changes get put in build
 colcon build --packages-select kortex_bringup --symlink-install
