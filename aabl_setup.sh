@@ -1,7 +1,11 @@
 
 # Bring up gazebo control for a simualted kinova arm WITHOUT a gripper
 # ros2 launch kortex_bringup kortex_sim_control.launch.py   use_sim_time:=true   launch_rviz:=false
-ros2 launch kortex_bringup kortex_sim_control.launch.py   use_sim_time:=true   launch_rviz:=false robot_type:=gen3_lite dof:=6 gripper:=gen3_lite_2f
+# ros2 launch kortex_bringup kortex_sim_control.launch.py   use_sim_time:=true   launch_rviz:=false robot_type:=gen3_lite dof:=6 gripper:=gen3_lite_2f
+# ros2 launch kortex_bringup kortex_sim_control.launch.py   use_sim_time:=true   launch_rviz:=false robot_type:=gen3 dof:=7 gripper:=robotiq_2f_85
+
+# There's an existing issue with grippers in gazebo that will be fixed from within gazebo later. Not worth getting into it for simulated robots, just smoke test here and when you want to grip things, do it on the robot.
+ros2 launch kortex_bringup kortex_sim_control.launch.py   use_sim_time:=true   launch_rviz:=false robot_type:=gen3 dof:=7
 
 
 # We modified the launch file to hardcode in some task cubes to mess with. Here's a command to copy that file into "forked_kortex" in case our work gets blown away

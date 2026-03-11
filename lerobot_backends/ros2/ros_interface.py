@@ -53,9 +53,10 @@ class ROS2Interface:
     via the gripper_action_type configuration option.
     """
 
-    def __init__(self, config: ROS2InterfaceConfig, action_type: ActionType):
+    def __init__(self, config: ROS2InterfaceConfig, action_type: ActionType, use_sim_time: bool = False):
         self.config = config
         self.action_type = action_type
+        self._use_sim_time = use_sim_time
         self.robot_node: Node | None = None
         self.pos_cmd_pub: Publisher | None = None
         self.traj_cmd_pub: Publisher | None = None
@@ -71,7 +72,14 @@ class ROS2Interface:
         if not rclpy.ok():
             rclpy.init()
 
-        self.robot_node = Node("moveit2_interface_node", namespace=self.config.namespace)
+        from rclpy.parameter import Parameter as RclpyParameter
+        self.robot_node = Node(
+            "moveit2_interface_node",
+            namespace=self.config.namespace,
+            parameter_overrides=[
+                RclpyParameter("use_sim_time", RclpyParameter.Type.BOOL, self._use_sim_time),
+            ],
+        )
         if self.action_type == ActionType.JOINT_POSITION:
             self.pos_cmd_pub = self.robot_node.create_publisher(
                 Float64MultiArray, self.config.position_topic, 10
@@ -87,18 +95,19 @@ class ROS2Interface:
                 callback_group=ReentrantCallbackGroup(),
             )
 
-        if self.config.gripper_action_type == GripperActionType.TRAJECTORY:
-            self.gripper_traj_pub = self.robot_node.create_publisher(
-                JointTrajectory, self.config.gripper_traj_topic, 10
-            )
-        else:
-            self.gripper_action_client = ActionClient(
-                self.robot_node,
-                GripperCommand,
-                self.config.gripper_topic,
-                callback_group=ReentrantCallbackGroup(),
-            )
-            self._goal_msg = GripperCommand.Goal()
+        if self.config.gripper_joint_name:
+            if self.config.gripper_action_type == GripperActionType.TRAJECTORY:
+                self.gripper_traj_pub = self.robot_node.create_publisher(
+                    JointTrajectory, self.config.gripper_traj_topic, 10
+                )
+            else:
+                self.gripper_action_client = ActionClient(
+                    self.robot_node,
+                    GripperCommand,
+                    self.config.gripper_topic,
+                    callback_group=ReentrantCallbackGroup(),
+                )
+                self._goal_msg = GripperCommand.Goal()
 
         self.joint_state_sub = self.robot_node.create_subscription(
             JointState,

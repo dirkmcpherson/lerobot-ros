@@ -124,6 +124,7 @@ def make_input_device(
             min_joint_positions=iface.min_joint_positions,
             max_joint_positions=iface.max_joint_positions,
             urdf_path=urdf_path,
+            ee_link='bracelet_link',
             gripper_joint_name=iface.gripper_joint_name,
             gripper_open_position=iface.gripper_open_position,
             gripper_closed_position=iface.gripper_close_position,
@@ -180,11 +181,21 @@ def main():
         "--overwrite", action="store_true",
         help="Delete and recreate the dataset directory if it already exists"
     )
+    parser.add_argument(
+        "--no-boxes", action="store_true",
+        help="Skip box randomization and pose tracking (for arm-only teleop)"
+    )
+    parser.add_argument(
+        "--use-sim-time", action="store_true",
+        help="Set use_sim_time on the ROS2 node (required for Gazebo sim)"
+    )
 
     args = parser.parse_args()
 
     config_cls, dataset_repo_id, root_dir, robot_type = _ROBOT_CONFIGS[args.robot]
     config = config_cls()
+    if args.use_sim_time:
+        config.use_sim_time = True
     iface = config.ros2_interface
     arm_joint_names = iface.arm_joint_names
     gripper_joint_name: Optional[str] = iface.gripper_joint_name or None
@@ -207,8 +218,11 @@ def main():
     time.sleep(2.0)
 
     # Subscribe to live box pose topics via the robot's ROS node
-    box_tracker = BoxPoseTracker(robot.ros2_interface.robot_node, BOX_POSE_TOPICS)
-    time.sleep(1.0)  # let first pose messages arrive
+    use_boxes = not args.no_boxes
+    box_tracker = None
+    if use_boxes:
+        box_tracker = BoxPoseTracker(robot.ros2_interface.robot_node, BOX_POSE_TOPICS)
+        time.sleep(1.0)  # let first pose messages arrive
 
     # Connect input device
     user_input.connect()
@@ -219,18 +233,18 @@ def main():
             "shape": (state_dim,),
             "names": all_joint_names,
         },
-        # Live cube positions (read each frame from Gazebo)
-        "observation.environment_state": {
-            "dtype": "float32",
-            "shape": (6,),
-            "names": ["green_x", "green_y", "green_z", "red_x", "red_y", "red_z"],
-        },
         "action": {
             "dtype": "float32",
             "shape": (state_dim,),
             "names": all_joint_names,
         },
     }
+    if use_boxes:
+        dataset_features["observation.environment_state"] = {
+            "dtype": "float32",
+            "shape": (6,),
+            "names": ["green_x", "green_y", "green_z", "red_x", "red_y", "red_z"],
+        }
 
     dataset = LeRobotDataset.create(
         repo_id=dataset_repo_id,
@@ -253,9 +267,10 @@ def main():
         while saved_episodes < args.num_episodes and not user_input.quit_requested:
             logger.info(f"\n=== Episode {saved_episodes + 1}/{args.num_episodes} ===")
 
-            # 1. Randomize boxes
-            randomize_boxes()
-            time.sleep(0.5)  # let physics settle + pose messages update
+            # 1. Randomize boxes (if enabled)
+            if use_boxes:
+                randomize_boxes()
+                time.sleep(0.5)  # let physics settle + pose messages update
 
             # 2. Reset robot (backend handles home position + settle automatically)
             obs = robot.backend.reset()
@@ -290,8 +305,8 @@ def main():
                 else:
                     current_state = np.array(arm_state, dtype=np.float32)
 
-                # Live cube positions from Gazebo
-                env_state = box_tracker.get_positions()
+                # Live cube positions from Gazebo (if enabled)
+                env_state = box_tracker.get_positions() if use_boxes else None
 
                 # Action: arm from input device, gripper from button toggle
                 arm_targets = user_input.get_action(arm_state)
@@ -309,20 +324,25 @@ def main():
 
                 if frame_count % 10 == 0:
                     gripper_str = f" | gripper: {action_vec[-1]:.3f}" if gripper_joint_name else ""
+                    boxes_str = (
+                        f" | boxes: [{env_state[0]:.2f},{env_state[1]:.2f},{env_state[2]:.2f}]"
+                        f"[{env_state[3]:.2f},{env_state[4]:.2f},{env_state[5]:.2f}]"
+                        if env_state is not None else ""
+                    )
                     logger.info(
                         f"  Frame {frame_count:3d} | "
-                        f"state: {[f'{v:.3f}' for v in current_state[:3]]} | "
-                        f"boxes: [{env_state[0]:.2f},{env_state[1]:.2f},{env_state[2]:.2f}]"
-                        f"[{env_state[3]:.2f},{env_state[4]:.2f},{env_state[5]:.2f}]"
-                        f"{gripper_str}"
+                        f"state: {[f'{v:.3f}' for v in current_state[:3]]}"
+                        f"{boxes_str}{gripper_str}"
                     )
 
-                episode_frames.append({
+                frame = {
                     "observation.state": current_state,
-                    "observation.environment_state": env_state,
                     "action": action_vec,
-                    "task": "Stack cubes",
-                })
+                    "task": "Teleop",
+                }
+                if env_state is not None:
+                    frame["observation.environment_state"] = env_state
+                episode_frames.append(frame)
                 frame_count += 1
 
                 dt = time.perf_counter() - step_start
@@ -350,7 +370,8 @@ def main():
     except KeyboardInterrupt:
         logger.info("Recording interrupted.")
     finally:
-        box_tracker.destroy()
+        if box_tracker is not None:
+            box_tracker.destroy()
         user_input.disconnect()
         robot.disconnect()
         logger.info(f"Done. {saved_episodes} episodes saved to {root_dir}")

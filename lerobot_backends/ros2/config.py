@@ -86,6 +86,9 @@ class ROS2BackendConfig(BackendRobotConfig):
     home_position: list[float] | None = None
     home_settle_sec: float = 6.0
 
+    # Simulation
+    use_sim_time: bool = False
+
 
 # ---------------------------------------------------------------------------
 # Robot-specific presets

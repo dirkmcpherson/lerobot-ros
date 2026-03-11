@@ -18,7 +18,7 @@ class ROS2Backend:
 
     def __init__(self, config: ROS2BackendConfig):
         self.config = config
-        self._interface = ROS2Interface(config.ros2_interface, config.action_type)
+        self._interface = ROS2Interface(config.ros2_interface, config.action_type, use_sim_time=config.use_sim_time)
         self._cameras = make_cameras_from_configs(config.cameras)
         self._connected = False
 
