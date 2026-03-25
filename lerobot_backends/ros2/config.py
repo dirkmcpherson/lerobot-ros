@@ -47,6 +47,7 @@ class ROS2InterfaceConfig:
     gripper_joint_name: str | None = "gripper_joint"
 
     base_link: str = "base_link"
+    ee_link: str = "tool_frame"
 
     # Cartesian velocity limits
     max_linear_velocity: float = 0.10
@@ -81,6 +82,10 @@ class ROS2BackendConfig(BackendRobotConfig):
     ros2_interface: ROS2InterfaceConfig = field(default_factory=ROS2InterfaceConfig)
 
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
+
+    # Trajectory timing — how long the controller has to reach each target.
+    # Should match 1/control_rate for streaming commands (e.g. 0.1 for 10 Hz).
+    action_time_from_start_sec: float = 0.2
 
     # Episode-reset parameters
     home_position: list[float] | None = None
@@ -156,7 +161,7 @@ class KinovaGen3Config(ROS2BackendConfig):
     )
 
     home_position: list[float] | None = field(
-        default_factory=lambda: [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
+        default_factory=lambda: [0.0, 0.52, 3.14, -1.22, 0.0, -0.52, 1.57]
     )
 
 
@@ -185,7 +190,5 @@ class KinovaGen3LiteConfig(ROS2BackendConfig):
     )
 
     home_position: list[float] | None = field(
-        # default_factory=lambda: [0.0, -1.57, 0.0, 0.0, 0.0, 0.0]
-        default_factory=lambda: [0.0, -1.00, 3.14, 1.57, -2.0, 1.57]
-
+        default_factory=lambda: [0.0, -0.52, 1.22, -1.22, -0.52, 0.0]
     )

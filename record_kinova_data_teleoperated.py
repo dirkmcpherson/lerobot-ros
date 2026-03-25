@@ -41,7 +41,7 @@ init_logging()
 logger = logging.getLogger(__name__)
 
 # --- Dataset config ----------------------------------------------------------
-FPS = 10
+FPS = 5
 MAX_EPISODE_FRAMES = 300  # safety cap: 30 s
 
 # Box pose ROS topics (bridged from Gazebo)
@@ -124,7 +124,9 @@ def make_input_device(
             min_joint_positions=iface.min_joint_positions,
             max_joint_positions=iface.max_joint_positions,
             urdf_path=urdf_path,
-            ee_link='bracelet_link',
+            ee_link=iface.ee_link,
+            linear_scale=0.15,
+            angular_scale=0.4,
             gripper_joint_name=iface.gripper_joint_name,
             gripper_open_position=iface.gripper_open_position,
             gripper_closed_position=iface.gripper_close_position,
@@ -188,6 +190,10 @@ def main():
     parser.add_argument(
         "--use-sim-time", action="store_true",
         help="Set use_sim_time on the ROS2 node (required for Gazebo sim)"
+    )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Dry-run: log commanded joint positions and deltas but never send to robot"
     )
 
     args = parser.parse_args()
@@ -273,7 +279,10 @@ def main():
                 time.sleep(0.5)  # let physics settle + pose messages update
 
             # 2. Reset robot (backend handles home position + settle automatically)
-            obs = robot.backend.reset()
+            if args.debug:
+                obs = robot.backend.get_observation()
+            else:
+                obs = robot.backend.reset()
             actual_home = [obs[f"{j}.pos"] for j in arm_joint_names]
             user_input.reset(actual_home)
 
@@ -282,7 +291,7 @@ def main():
 
             if gripper_joint_name:
                 logger.info(
-                    "Recording. SpaceMouse: move EE | Left=save | Right=gripper toggle | Both=discard+quit"
+                    "Recording. SpaceMouse: move EE | Left=save | Right/Both=gripper toggle | Ctrl+C=quit"
                 )
             else:
                 logger.info("Recording. Use input device to move robot. Enter=save, D=discard.")
@@ -320,9 +329,18 @@ def main():
                 action_dict = {f"{j}.pos": float(action_vec[i]) for i, j in enumerate(arm_joint_names)}
                 if gripper_joint_name:
                     action_dict["gripper.pos"] = float(action_vec[-1])
-                robot.backend.send_action(action_dict)
 
-                if frame_count % 10 == 0:
+                delta = action_vec - current_state
+                if args.debug:
+                    logger.info(
+                        f"  Frame {frame_count:3d} | "
+                        f"cmd: [{', '.join(f'{v:.4f}' for v in action_vec)}] | "
+                        f"delta: [{', '.join(f'{v:+.4f}' for v in delta)}]"
+                    )
+                else:
+                    robot.backend.send_action(action_dict)
+
+                if not args.debug and frame_count % 10 == 0:
                     gripper_str = f" | gripper: {action_vec[-1]:.3f}" if gripper_joint_name else ""
                     boxes_str = (
                         f" | boxes: [{env_state[0]:.2f},{env_state[1]:.2f},{env_state[2]:.2f}]"

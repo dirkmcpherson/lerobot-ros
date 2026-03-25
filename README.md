@@ -1,173 +1,189 @@
 # LeRobot ROS
 
-This repository provides a generic ROS 2 interface for the [LeRobot](https://github.com/huggingface/lerobot) framework. It acts as a lightweight wrapper to connect any [ros2_control](https://control.ros.org/rolling/index.html) or [MoveIt](https://moveit.ai/) compatible robot arm with the LeRobot ecosystem.
+Multi-backend robot interface for the [LeRobot](https://github.com/huggingface/lerobot) framework. Supports ROS 2 hardware robots, ManiSkill simulation, and is extensible to other backends.
 
-A gamepad teleoperator for 6-DoF end-effector control and a keyboard teleoperator for joint position control is also provided.
+Forked from [ycheng517/lerobot-ros](https://github.com/ycheng517/lerobot-ros) and extended with a unified backend architecture.
 
-**Supported control modes:**
+## Architecture
 
-- Joint position with ros2_control
-  - Using [joint_trajectory_controller](https://control.ros.org/rolling/doc/ros2_controllers/joint_trajectory_controller/doc/userdoc.html)
-  - Using [position_controllers](https://control.ros.org/rolling/doc/ros2_controllers/position_controllers/doc/userdoc.html)
-- End-effector velocity with MoveIt 2
-  - Using [Moveit Servo](https://moveit.picknik.ai/main/doc/examples/realtime_servo/realtime_servo_tutorial.html)
-- Gripper control with ros2_control
-  - Using [joint_trajectory_controller](https://control.ros.org/rolling/doc/ros2_controllers/joint_trajectory_controller/doc/userdoc.html)
-  - Using [Gripper Action Controller](https://control.ros.org/jazzy/doc/ros2_controllers/gripper_controllers/doc/userdoc.html)
+```
+lerobot_backends/
+├── backend.py          # RobotBackend Protocol
+├── config.py           # BackendRobotConfig base
+├── robot.py            # BackendRobot(Robot) — generic wrapper
+├── factory.py          # make_backend(config) — selects backend by config type
+├── gym_adapter.py      # RobotGymEnv — wraps BackendRobot as gymnasium.Env
+├── ros2/
+│   ├── config.py       # ROS2BackendConfig, KinovaGen3Config, KinovaGen3LiteConfig, etc.
+│   ├── backend.py      # ROS2Backend — wraps ROS2Interface + cameras
+│   ├── ros_interface.py
+│   └── moveit_servo.py
+└── maniskill/
+    ├── config.py       # ManiSkillBackendConfig, ManiSkillPickCubeConfig
+    └── backend.py      # ManiSkillBackend — wraps gymnasium env
+```
 
-## Video Demo
+Usage: `BackendRobot(config)` — the config type selects the backend automatically.
 
-[![lerobot-ros](https://markdown-videos-api.jorgenkh.no/url?url=https%3A%2F%2Fyoutu.be%2F8U8vDyi5IAs)](https://youtu.be/8U8vDyi5IAs)
+```python
+from lerobot_backends.ros2.config import KinovaGen3LiteConfig
+from lerobot_backends.robot import BackendRobot
+
+robot = BackendRobot(KinovaGen3LiteConfig())
+robot.connect()
+robot.backend.reset()
+obs = robot.backend.get_observation()
+```
+
+## Supported Robots
+
+| Robot | Config | Backend | Control Modes |
+|-------|--------|---------|---------------|
+| Kinova Gen3 (7-DOF) | `KinovaGen3Config` | ROS2 | Joint trajectory |
+| Kinova Gen3 Lite (6-DOF) | `KinovaGen3LiteConfig` | ROS2 | Joint trajectory + gripper action |
+| Annin AR4 | `AnninAR4Config` | ROS2 | Cartesian velocity (MoveIt Servo) |
+| SO-101 | `SO101ROSConfig` | ROS2 | Joint trajectory |
+| ManiSkill PickCube | `ManiSkillPickCubeConfig` | ManiSkill | Gymnasium env |
+
+## ROS 2 Control Modes
+
+**Arm:**
+- `ActionType.JOINT_POSITION` — `position_controllers/JointGroupPositionController`
+- `ActionType.JOINT_TRAJECTORY` — `joint_trajectory_controller/JointTrajectoryController`
+- `ActionType.CARTESIAN_VELOCITY` — MoveIt Servo
+
+**Gripper:**
+- `GripperActionType.TRAJECTORY` — publishes `JointTrajectory` to gripper topic
+- `GripperActionType.ACTION` — sends goals to `GripperActionController`
+
+## Scripts
+
+### Data Collection
+
+```bash
+# Teleoperated (spacemouse + differential IK)
+python record_kinova_data_teleoperated.py --robot gen3_lite --input spacemouse --urdf /tmp/gen3_lite.urdf
+
+# Scripted (random target positions)
+python record_kinova_data.py
+
+# ManiSkill simulation
+python record_maniskill_data.py
+```
+
+### Training
+
+```bash
+# Diffusion policy on cube stacking data
+bash train_cube_stacking.sh
+
+# Diffusion policy on reach data
+bash train_kinova_reach.sh
+
+# Diffusion policy on ManiSkill data
+bash train_maniskill.sh
+```
+
+### Evaluation
+
+```bash
+python eval_cube_stacking.py
+python eval_kinova_reach.py
+python eval_maniskill.py
+```
+
+See [MANISKILL.md](MANISKILL.md) for the full ManiSkill pipeline walkthrough.
+
+### Playback
+
+```bash
+python playback_kinova_trajectory.py
+```
+
+## Spacemouse Teleoperation
+
+Uses [pinocchio](https://github.com/stack-of-tasks/pinocchio) for differential IK. Requires a URDF file:
+
+```bash
+# Generate URDF from xacro
+source ~/workspace/ros2_kortex_ws/install/setup.bash
+xacro ~/workspace/ros2_kortex_ws/src/ros2_kortex/kortex_description/robots/gen3_lite_gen3_lite_2f.xacro > /tmp/gen3_lite.urdf
+```
+
+**Button mapping (with gripper):** Left = save episode, Right = toggle gripper, Both = discard + quit
+
+## Gazebo Simulation
+
+```bash
+# Launch Gen3 7-DOF (no gripper — Gazebo gripper is a known issue)
+ros2 launch kortex_bringup kortex_sim_control.launch.py \
+  use_sim_time:=true launch_rviz:=false robot_type:=gen3 dof:=7
+
+# Launch Gen3 Lite 6-DOF with gripper
+ros2 launch kortex_bringup kortex_sim_control.launch.py \
+  use_sim_time:=true launch_rviz:=false robot_type:=gen3_lite dof:=6 gripper:=gen3_lite_2f
+```
+
+Modified ros2_kortex files are backed up in `forked_cortex/`.
 
 ## Prerequisites
 
-### Software Requirements
-
-Before getting started, ensure you have the following installed:
-
-- [ROS 2 Jazzy](https://docs.ros.org/en/jazzy/Installation.html) - This repo is only tested on Jazzy.
+- [ROS 2 Jazzy](https://docs.ros.org/en/jazzy/Installation.html)
 - [ros2_control](https://control.ros.org/rolling/index.html)
-- If end-effector control is desired, then [MoveIt2](https://moveit.ai/install-moveit2/binary) needs to be installed
+- [MoveIt 2](https://moveit.ai/install-moveit2/binary) (for cartesian velocity control)
+- [pinocchio](https://github.com/stack-of-tasks/pinocchio) (for spacemouse IK)
 
-## Quickstart with Simulated SO-101
-
-Below steps will allow you to perform keyboard teleoperation of a simulated SO-101 arm using Lerobot.
-
----
-
-First, setup LeRobot and lerobot-ros in a virtual environment. Note that the Python version of the virtualenv must be compatible with your ROS version. For ROS 2 Jazzy, we use Python 3.12.
+## Install
 
 ```bash
-# Create and activate virtual env
 conda create -y -n lerobot-ros python=3.12
 conda activate lerobot-ros
-conda install -c conda-forge libstdcxx-ng -y # needed as rclpy requires GLIBCXX_3.4.30 symbols
-
-# Source ROS
+conda install -c conda-forge libstdcxx-ng -y
 source /opt/ros/jazzy/setup.sh
 
-# Install lerobot-ros packages (this will install a compatible version of lerobot as well)
-git clone https://github.com/ycheng517/lerobot-ros
+git clone <this-repo>
 cd lerobot-ros
 pip install -e lerobot_robot_ros lerobot_teleoperator_devices
 ```
 
-Then, setup the Simulated SO-101 by following instructions in: https://github.com/Pavankv92/lerobot_ws
+## Adding a New Robot
 
-Finally, to run all programs:
-
-```bash
-# In terminal 1, run the Gazebo simulation
-ros2 launch lerobot_description so101_gazebo.launch.py
-
-# In terminal 2, load the ros2 controllers and run MoveIt
-ros2 launch lerobot_controller so101_controller.launch.py && \
-  ros2 launch lerobot_moveit so101_moveit.launch.py
-
-# In terminal 3, run lerobot with the ROS version of so101 and keyboard teleop
-cd <YOUR lerobot-ros DIRECTORY>
-lerobot-teleoperate \
-  --robot.type=so101_ros \
-  --robot.id=my_awesome_follower_arm \
-  --teleop.type=keyboard_joint \
-  --teleop.id=my_awesome_leader_arm \
-  --display_data=true
-```
-
-Once you have teleoperation working, you can use all standard LeRobot features as usual.
-
-## Robot Integration Guide
-
-This section describes how to integrate other ROS-based robots with Lerobot.
-
-### Arm Control Modes
-
-Currently the repo supports the following arm control modes:
-
-**Option 1: Joint Position Control**
-
-This option uses [position_controllers](https://control.ros.org/rolling/doc/ros2_controllers/position_controllers/doc/userdoc.html) in `ros2_control`. It requires the robot to have:
-
-- `position_controllers/JointGroupPositionController` for the robot arm joints
-- `joint_state_broadcaster/JointStateBroadcaster` for joint state feedback
-
-This option is enabled by setting `action_type` to `ActionType.JOINT_POSITION` in robot config.
-
-**Option 2: Joint Trajectory Control**
-
-This option uses [joint_trajectory_controller](https://control.ros.org/rolling/doc/ros2_controllers/joint_trajectory_controller/doc/userdoc.html) in `ros2_control`. It requires the robot to have:
-
-- `joint_trajectory_controller/JointTrajectoryController` for the robot arm joints
-- `joint_state_broadcaster/JointStateBroadcaster` for joint state feedback
-
-This option is enabled by setting `action_type` to `ActionType.JOINT_TRAJECTORY` in robot config.
-
-**Option 3: End-Effector Control**
-
-This option uses [Moveit Servo](https://moveit.picknik.ai/main/doc/examples/realtime_servo/realtime_servo_tutorial.html) in MoveIt. It requires the robot to have:
-
-- The `moveit_servo` node for real-time end-effector control
-- `joint_trajectory_controller/JointTrajectoryController` for robot arm control
-- `joint_state_broadcaster/JointStateBroadcaster` for joint state feedback
-
-This option is enabled by setting `action_type` to `ActionType.CARTESIAN_VELOCITY` in robot config. See: [ar4_ros_driver](https://github.com/ycheng517/ar4_ros_driver) for an example of using `moveit_servo`.
-
-### Gripper Control Modes
-
-The repo supports two gripper control modes that can be configured via the `gripper_action_type` setting:
-
-**Trajectory Control (`GripperActionType.TRAJECTORY`)**
-
-- Uses `JointTrajectoryController` from ros2_control
-- Publishes `JointTrajectory` messages to `/gripper_controller/joint_trajectory`
-
-**Action Control (`GripperActionType.ACTION`)**
-
-- Uses `GripperActionController` from ros2_control
-- Sends action goals to `/gripper_controller/gripper_cmd`
-- Provides feedback on whether the gripper reached its target position
-
-### Code Changes to Lerobot-ros
-
-Extend the `ROS2Robot` class in [robot.py](./lerobot_robot_ros/lerobot_robot_ros/robot.py).
-This class can be a simple pass-through. It's just is needed to satisfy lerobot device discovery requirements.
+1. Create a config in `lerobot_backends/ros2/config.py`:
 
 ```python
-class MyRobot(ROS2Robot):
-  pass
-```
-
-Then, create a config class for your robot by sub-classing `ROS2Config` in [config.py](./lerobot_robot_ros/lerobot_robot_ros/config.py).
-The name of this class must be the same as your robot class, suffixed by `Config`.
-You may override joint names, gripper configurations, and other parameters as needed.
-An example config class for joint velocity control may look like this:
-
-```python
-from dataclasses import dataclass, field
-from lerobot.common.robots.config import RobotConfig
-from lerobot.common.robots.config import ROS2Config, ROS2InterfaceConfig
-
-@RobotConfig.register_subclass("my_ros2_robot")
 @dataclass
-class MyRobotConfig(ROS2Config):
-    action_type: ActionType = ActionType.JOINT_POSITION
-
+class MyRobotConfig(ROS2BackendConfig):
+    action_type: ActionType = ActionType.JOINT_TRAJECTORY
     ros2_interface: ROS2InterfaceConfig = field(
         default_factory=lambda: ROS2InterfaceConfig(
-            base_link="base_link",
-            arm_joint_names=[
-                "joint_1",
-                "joint_2",
-                "joint_3",
-                "joint_4",
-                "joint_5",
-                "joint_6",
-            ],
+            arm_joint_names=["joint_1", "joint_2", ...],
             gripper_joint_name="gripper_joint",
-            gripper_open_position=0.0,
-            gripper_close_position=1.0,
-            max_linear_velocity=0.05,  # m/s
-            max_angular_velocity=0.25,  # rad/s
         )
     )
+    home_position: list[float] | None = field(
+        default_factory=lambda: [0.0, 0.0, ...]
+    )
 ```
+
+2. Use it: `robot = BackendRobot(MyRobotConfig())`
+
+## Adding a New Backend
+
+Implement the `RobotBackend` Protocol from `lerobot_backends/backend.py`:
+
+```python
+class RobotBackend(Protocol):
+    @property
+    def observation_features(self) -> dict[str, type | tuple]: ...
+    @property
+    def action_features(self) -> dict[str, type]: ...
+    @property
+    def is_connected(self) -> bool: ...
+    def connect(self) -> None: ...
+    def disconnect(self) -> None: ...
+    def reset(self) -> dict[str, Any]: ...
+    def get_observation(self) -> dict[str, Any]: ...
+    def send_action(self, action: dict[str, Any]) -> dict[str, Any]: ...
+```
+
+Then register your config type in `lerobot_backends/factory.py`.

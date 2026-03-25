@@ -134,7 +134,10 @@ class ROS2Backend:
             joint_positions = [
                 action[f"{j}.pos"] for j in iface_cfg.arm_joint_names
             ]
-            self._interface.send_joint_position_command(joint_positions)
+            self._interface.send_joint_position_command(
+                joint_positions,
+                time_from_start_sec=self.config.action_time_from_start_sec,
+            )
 
         if "gripper.pos" in action:
             self._interface.send_gripper_command(action["gripper.pos"], unnormalize=False)

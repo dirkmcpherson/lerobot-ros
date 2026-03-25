@@ -51,6 +51,8 @@ dead_zone            : Fractional dead-zone on raw [-1,1] axes (default: 0.05)
 gripper_joint_name   : Joint name of the gripper, or None to disable (default: None)
 gripper_open_position : Gripper joint position when fully open (default: 0.0)
 gripper_closed_position : Gripper joint position when fully closed (default: 0.85)
+damping              : DLS damping factor λ for singularity robustness (default: 0.05)
+input_smoothing      : EMA alpha on spacemouse axes; lower = smoother but laggier (default: 0.5)
 """
 
 import logging
@@ -81,6 +83,8 @@ class SpacemouseUserInput(UserInput):
         gripper_joint_name: Optional[str] = None,
         gripper_open_position: float = 0.0,
         gripper_closed_position: float = 0.85,
+        damping: float = 0.05,
+        input_smoothing: float = 0.5,
     ):
         self._names = joint_names
         self._min = np.array(min_joint_positions)
@@ -91,6 +95,8 @@ class SpacemouseUserInput(UserInput):
         self._linear_scale = linear_scale
         self._angular_scale = angular_scale
         self._dead_zone = dead_zone
+        self._damping = damping
+        self._input_alpha = input_smoothing
         self._n = len(joint_names)
 
         self._gripper_joint_name = gripper_joint_name
@@ -100,6 +106,7 @@ class SpacemouseUserInput(UserInput):
         self._gripper_position: float = gripper_open_position
 
         self._targets: np.ndarray = np.zeros(self._n)
+        self._smoothed_axes: np.ndarray = np.zeros(6)
         self._last_time: float = time.perf_counter()
         self._pin_model = None  # pinocchio model, created in connect()
         self._pin_data = None
@@ -170,12 +177,14 @@ class SpacemouseUserInput(UserInput):
                 if state is not None:
                     with self._lock:
                         self._latest_state = state
-                        # Latch any non-zero button state so it survives until
-                        # get_action() processes it (reader runs much faster
-                        # than the control loop).
+                        # Latch button state so get_action() sees presses AND
+                        # releases (needed to reset _prev_buttons for edge
+                        # detection on the next press).
                         btns = list(state.buttons) + [0, 0]
                         if btns[0] or btns[1]:
                             self._pending_buttons = btns[:2]
+                        elif self._prev_buttons[0] or self._prev_buttons[1]:
+                            self._pending_buttons = [0, 0]
             except Exception:
                 break
 
@@ -205,6 +214,7 @@ class SpacemouseUserInput(UserInput):
     def reset(self, current_positions: list[float]) -> None:
         with self._lock:
             self._targets = np.array(current_positions, dtype=float)
+            self._smoothed_axes = np.zeros(6)
             self._last_time = time.perf_counter()
             self._end = False
             self._discard = False
@@ -237,12 +247,25 @@ class SpacemouseUserInput(UserInput):
                 axes[:3] *= self._linear_scale
                 axes[3:] *= self._angular_scale
 
+                # EMA on input: smooth spacemouse noise and dead-zone transitions.
+                # When raw input is all zeros (hand off device), snap to zero
+                # immediately to prevent residual drift.
+                if np.all(axes == 0.0):
+                    self._smoothed_axes[:] = 0.0
+                else:
+                    self._smoothed_axes = (
+                        self._input_alpha * axes
+                        + (1.0 - self._input_alpha) * self._smoothed_axes
+                    )
+                axes = self._smoothed_axes
+
                 if np.any(axes != 0.0):
-                    # --- Differential IK ---
+                    # --- Differential IK (damped least squares) ---
                     J = self._jacobian(current_positions)
-                    # Minimum-norm joint velocity: dq = J^+ · v_cart
-                    J_pinv = np.linalg.pinv(J)
-                    dq = J_pinv @ axes
+                    JJT = J @ J.T
+                    dq = J.T @ np.linalg.solve(
+                        JJT + self._damping**2 * np.eye(JJT.shape[0]), axes
+                    )
 
                     # Integrate and clamp
                     new_targets = np.array(current_positions) + dq * dt
@@ -353,24 +376,23 @@ class SpacemouseUserInput(UserInput):
         right_pressed = b[1] and not prev[1]
         both_held     = b[0] and b[1]
 
+        # print out the button states
+        print(b, prev)
+
         if self._gripper_joint_name is not None:
-            # Gripper mode: right button toggles gripper; both = discard + quit
-            if both_held:
-                logger.info("Both buttons — discard and quit.")
-                self._discard = True
-                self._quit = True
-                self._end = True
-            elif left_pressed:
-                logger.info("Left button — save episode.")
-                self._end = True
-            elif right_pressed:
+            # Gripper mode: right/both = toggle gripper, left alone = save, Ctrl+C = quit
+            if right_pressed or (both_held and not prev[1]):
                 self._gripper_is_open = not self._gripper_is_open
                 self._gripper_position = (
                     self._gripper_open_position if self._gripper_is_open
                     else self._gripper_closed_position
                 )
                 state = "open" if self._gripper_is_open else "closed"
-                logger.info(f"Right button — gripper {state} ({self._gripper_position:.3f}).")
+                logger.info(f"Gripper toggle → {state} ({self._gripper_position:.3f})")
+            elif left_pressed and not b[1]:
+                logger.info("Left button — save episode.")
+                self._end = True
+
         else:
             # No gripper: original mapping (left=save, right=discard, both=quit)
             if both_held:
