@@ -70,11 +70,26 @@ huggingface-cli download google/umt5-xxl \
 Record 50-100 demonstrations of picking up blocks. More diversity in block position/color matters more than repetition. The paper showed results with as few as 55 trajectories (~30 min).
 
 What to record:
-- **Cameras**: 2-3 views as MP4 video files
+- **Cameras**: 2-3 views as MP4 video files (see camera placement below)
 - **State**: 6 joint positions + 1 gripper position per timestep
 - **Actions**: 6 joint position targets + 1 gripper target per timestep
 - **Language annotation**: "pick up the block" (or varied: "pick up the red block", "grab the block", etc.)
 - **FPS**: 30Hz recommended (match to your robot's control frequency)
+
+#### Camera Placement
+
+DROID (the single-arm reference) uses 3 cameras: two fixed exterior views from different angles, plus one wrist-mounted camera. For a 2-camera setup, use:
+
+1. **One fixed exterior camera** -- overhead or ~45-degree downward angle from the side/front, covering the full workspace (table, block, and arm). The block and gripper should both be visible throughout the entire reach-grasp-lift trajectory.
+2. **One wrist-mounted camera** -- attached to the end-effector, looking toward the gripper. This gives close-up spatial information for the final approach and grasp, which is critical for manipulation accuracy.
+
+If you add a third camera, place it as a second exterior view from a substantially different angle (e.g., front-left and front-right) to help the model resolve depth ambiguity.
+
+Practical tips:
+- Keep cameras fixed between episodes -- the model treats camera placement as part of the environment
+- Resolution doesn't need to be high; everything gets resized to 320x176 for training
+- Avoid views where the block is frequently occluded by the arm
+- Consistent, even lighting helps; the pipeline applies color jitter augmentation but large shadows still hurt
 
 #### LeRobot Version Note
 
@@ -183,6 +198,38 @@ modality_config_myarm:
     modality_keys:
       - annotation.task
 ```
+
+#### Understanding the Transforms
+
+The transform pipeline processes raw data into the format the model expects. You define it as a list of steps applied in order. Here's what each one does:
+
+**Video transforms** (applied to all camera streams):
+
+| Transform | What it does | Config |
+|---|---|---|
+| `VideoToTensor` | Converts raw uint8 frames to float tensors | No params |
+| `VideoCrop` | Random crop at 95% scale during training (data augmentation to handle slight camera shifts) | `scale: 0.95`, `mode: random` |
+| `VideoResize` | Resizes to training resolution | `height: 176`, `width: 320` (set by training script) |
+| `VideoColorJitter` | Random brightness/contrast/saturation/hue perturbation (augmentation for lighting variation) | `brightness: 0.3, contrast: 0.4, saturation: 0.5, hue: 0.08` |
+| `VideoToNumpy` | Converts back to numpy for the data collator | No params |
+
+**State/Action transforms** (applied to joint + gripper channels):
+
+| Transform | What it does | Config |
+|---|---|---|
+| `StateActionToTensor` | Converts raw arrays to tensors | No params |
+| `StateActionTransform` | Normalizes values to [-1, 1] using dataset statistics | `normalization_modes` per key |
+
+The `normalization_modes` field tells the normalizer which strategy to use per key. Use **`q99`** for everything -- it clips to the 1st/99th percentile from `stats.json`, which is robust to outliers. Every state and action key must appear here or training will error.
+
+**Structural transforms** (order matters):
+
+| Transform | What it does |
+|---|---|
+| `ConcatTransform` | Concatenates multi-camera frames into a single image and multi-key state/action into single vectors. The `_concat_order` lists control the ordering. |
+| `${model_specific_transform}` | Internal model tokenization (required, don't change) |
+
+You should not need to modify any of the default values. The only things to customize are the `apply_to` keys (your camera/state/action names) and the `normalization_modes` keys, which must exactly match your `modality.json`.
 
 Add the transform block:
 
