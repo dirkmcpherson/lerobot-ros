@@ -50,6 +50,19 @@ BOX_POSE_TOPICS = {
     "task_box_red": "/model/task_box_red/pose",
 }
 
+# Collision checking paths
+_KORTEX_PKG_DIR = "/home/james/workspace/ros2_kortex_ws/src/ros2_kortex"
+_SRDF_PATHS = {
+    "gen3": (
+        f"{_KORTEX_PKG_DIR}/kortex_moveit_config/"
+        "kinova_gen3_7dof_robotiq_2f_85_moveit_config/config/gen3.srdf"
+    ),
+    "gen3_lite": (
+        f"{_KORTEX_PKG_DIR}/kortex_moveit_config/"
+        "kinova_gen3_lite_moveit_config/config/gen3_lite.srdf"
+    ),
+}
+
 # Per-robot configs: (config_class, dataset_repo_id, root_dir, robot_type)
 _ROBOT_CONFIGS: dict[str, tuple] = {
     "gen3": (
@@ -106,6 +119,8 @@ def make_input_device(
     name: str,
     config: ROS2BackendConfig,
     urdf_path: Optional[str] = None,
+    robot_key: Optional[str] = None,
+    ground_plane_z: Optional[float] = 0.0,
 ) -> UserInput:
     """Create a UserInput device from the backend config."""
     iface = config.ros2_interface
@@ -119,6 +134,7 @@ def make_input_device(
     if name == "spacemouse":
         if urdf_path is None:
             raise ValueError("--urdf is required when using the spacemouse input device")
+        srdf_path = _SRDF_PATHS.get(robot_key) if robot_key else None
         return SpacemouseUserInput(
             joint_names=iface.arm_joint_names,
             min_joint_positions=iface.min_joint_positions,
@@ -130,6 +146,9 @@ def make_input_device(
             gripper_joint_name=iface.gripper_joint_name,
             gripper_open_position=iface.gripper_open_position,
             gripper_closed_position=iface.gripper_close_position,
+            collision_srdf_path=srdf_path,
+            collision_package_dirs=[_KORTEX_PKG_DIR],
+            collision_ground_plane_z=ground_plane_z,
         )
     raise ValueError(f"Unknown input device '{name}'. Available: keyboard, spacemouse")
 
@@ -192,6 +211,10 @@ def main():
         help="Set use_sim_time on the ROS2 node (required for Gazebo sim)"
     )
     parser.add_argument(
+        "--no-collision", action="store_true",
+        help="Disable collision checking (self-collision + ground plane)"
+    )
+    parser.add_argument(
         "--debug", action="store_true",
         help="Dry-run: log commanded joint positions and deltas but never send to robot"
     )
@@ -215,7 +238,13 @@ def main():
         shutil.rmtree(root_dir)
 
     # Build input device
-    user_input = make_input_device(args.input, config, urdf_path=args.urdf)
+    ground_z = None if args.no_collision else -0.04
+    user_input = make_input_device(
+        args.input, config,
+        urdf_path=args.urdf,
+        robot_key=args.robot,
+        ground_plane_z=ground_z,
+    )
 
     # Connect robot via backend
     logger.info(f"Connecting to {args.robot}...")
@@ -232,6 +261,10 @@ def main():
 
     # Connect input device
     user_input.connect()
+
+    # Publish collision objects to RViz (if collision checking is active)
+    if hasattr(user_input, '_collision_checker') and user_input._collision_checker is not None:
+        user_input._collision_checker.publish_to_rviz(robot.ros2_interface.robot_node)
 
     dataset_features = {
         "observation.state": {

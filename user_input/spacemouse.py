@@ -53,6 +53,10 @@ gripper_open_position : Gripper joint position when fully open (default: 0.0)
 gripper_closed_position : Gripper joint position when fully closed (default: 0.85)
 damping              : DLS damping factor λ for singularity robustness (default: 0.05)
 input_smoothing      : EMA alpha on spacemouse axes; lower = smoother but laggier (default: 0.5)
+collision_srdf_path  : SRDF file for self-collision exclusion pairs (default: None = no checking)
+collision_package_dirs : Directories to resolve package:// mesh paths (default: None)
+collision_ground_plane_z : Z height of ground plane obstacle (default: None = no ground plane)
+collision_obstacles  : List of box obstacles [{type, half_extents, position, name}] (default: None)
 """
 
 import logging
@@ -85,6 +89,10 @@ class SpacemouseUserInput(UserInput):
         gripper_closed_position: float = 0.85,
         damping: float = 0.05,
         input_smoothing: float = 0.5,
+        collision_srdf_path: Optional[str] = None,
+        collision_package_dirs: Optional[list[str]] = None,
+        collision_ground_plane_z: Optional[float] = None,
+        collision_obstacles: Optional[list[dict]] = None,
     ):
         self._names = joint_names
         self._min = np.array(min_joint_positions)
@@ -97,6 +105,10 @@ class SpacemouseUserInput(UserInput):
         self._dead_zone = dead_zone
         self._damping = damping
         self._input_alpha = input_smoothing
+        self._collision_srdf_path = collision_srdf_path
+        self._collision_package_dirs = collision_package_dirs
+        self._collision_ground_plane_z = collision_ground_plane_z
+        self._collision_obstacles = collision_obstacles
         self._n = len(joint_names)
 
         self._gripper_joint_name = gripper_joint_name
@@ -108,6 +120,7 @@ class SpacemouseUserInput(UserInput):
         self._targets: np.ndarray = np.zeros(self._n)
         self._smoothed_axes: np.ndarray = np.zeros(6)
         self._last_time: float = time.perf_counter()
+        self._collision_checker = None  # CollisionChecker, created in connect()
         self._pin_model = None  # pinocchio model, created in connect()
         self._pin_data = None
         self._ee_frame_id: int = -1
@@ -269,7 +282,18 @@ class SpacemouseUserInput(UserInput):
 
                     # Integrate and clamp
                     new_targets = np.array(current_positions) + dq * dt
-                    self._targets = np.clip(new_targets, self._min, self._max)
+                    new_targets = np.clip(new_targets, self._min, self._max)
+
+                    # Block moves that enter a collision — but allow moves
+                    # that escape one (so the arm never gets stuck).
+                    if self._collision_checker is not None:
+                        q_new = self._build_q(new_targets.tolist())
+                        if self._collision_checker.check_collision(q_new):
+                            q_cur = self._build_q(current_positions)
+                            if not self._collision_checker.check_collision(q_cur):
+                                new_targets = self._targets  # block: safe → colliding
+
+                    self._targets = new_targets
 
             # Process latched button presses (survives reader overwrite race)
             if self._pending_buttons is not None:
@@ -339,13 +363,23 @@ class SpacemouseUserInput(UserInput):
             f"end-effector frame '{self._ee_link}' (id={self._ee_frame_id})"
         )
 
-    def _jacobian(self, joint_positions: list[float]) -> np.ndarray:
-        """Return the 6×N Jacobian (N = number of arm joints) at the given
-        configuration, expressed in the world-aligned local frame of the EE."""
+        # Set up collision checker if SRDF or ground plane is configured
+        if self._collision_srdf_path is not None or self._collision_ground_plane_z is not None:
+            from .collision import CollisionChecker
+
+            self._collision_checker = CollisionChecker(
+                urdf_path=self._urdf_path,
+                package_dirs=self._collision_package_dirs,
+                srdf_path=self._collision_srdf_path,
+                ground_plane_z=self._collision_ground_plane_z,
+                obstacles=self._collision_obstacles,
+            )
+            self._collision_checker.setup(self._pin_model)
+
+    def _build_q(self, joint_positions: list[float]) -> np.ndarray:
+        """Build a full pinocchio configuration vector from arm joint positions."""
         import pinocchio as pin
 
-        # Build a full configuration vector (size nq), neutral everywhere except
-        # for our arm joints. Continuous joints use SO(2): q[idx_q]=(cos θ, sin θ).
         q = pin.neutral(self._pin_model)
         for idx_q, pos, continuous in zip(self._q_indices, joint_positions, self._is_continuous):
             if continuous:
@@ -353,7 +387,14 @@ class SpacemouseUserInput(UserInput):
                 q[idx_q + 1] = np.sin(pos)
             else:
                 q[idx_q] = pos
+        return q
 
+    def _jacobian(self, joint_positions: list[float]) -> np.ndarray:
+        """Return the 6×N Jacobian (N = number of arm joints) at the given
+        configuration, expressed in the world-aligned local frame of the EE."""
+        import pinocchio as pin
+
+        q = self._build_q(joint_positions)
         pin.computeJointJacobians(self._pin_model, self._pin_data, q)
         J_full = pin.getFrameJacobian(
             self._pin_model,
