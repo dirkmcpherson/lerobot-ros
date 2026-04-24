@@ -25,7 +25,7 @@ init_logging()
 logger = logging.getLogger(__name__)
 
 DEFAULT_CHECKPOINT = Path("outputs/train/cube_stacking/checkpoints/last/pretrained_model")
-FPS = 10
+FPS = 5
 
 # Same box pose topics as recording script
 BOX_POSE_TOPICS = {
