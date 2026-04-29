@@ -30,8 +30,16 @@ from typing import Optional
 
 import numpy as np
 
+import cv2
+import lerobot.cameras.opencv.camera_opencv as _lerobot_opencv_cam
+from lerobot.cameras.configs import Cv2Rotation
+from lerobot.cameras.opencv import OpenCVCameraConfig
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.utils.utils import init_logging
+
+# Force V4L2 backend on Linux — the default CAP_ANY picks FFMPEG, which can't
+# negotiate MJPG/resolution properly and triggers VIDIOC_QBUF failures.
+_lerobot_opencv_cam.get_cv2_backend = lambda: int(cv2.CAP_V4L2)
 
 from lerobot_backends import BackendRobot
 from lerobot_backends.ros2.config import KinovaGen3Config, KinovaGen3LiteConfig, ROS2BackendConfig
@@ -41,8 +49,21 @@ init_logging()
 logger = logging.getLogger(__name__)
 
 # --- Dataset config ----------------------------------------------------------
-FPS = 5
-MAX_EPISODE_FRAMES = 300  # safety cap: 30 s
+DEFAULT_FPS = 5
+MAX_EPISODE_SECONDS = 60  # safety cap
+
+# Camera presets — wrist + exterior, MJPG @ 320x240 @ 30fps
+CAMERA_CONFIGS = {
+    "observation.images.wrist": OpenCVCameraConfig(
+        index_or_path=Path("/dev/video0"),
+        fps=30, width=320, height=240, fourcc="MJPG",
+    ),
+    "observation.images.exterior": OpenCVCameraConfig(
+        index_or_path=Path("/dev/video2"),
+        fps=30, width=320, height=240, fourcc="MJPG",
+        rotation=Cv2Rotation.ROTATE_180,
+    ),
+}
 
 # Box pose ROS topics (bridged from Gazebo)
 BOX_POSE_TOPICS = {
@@ -218,13 +239,36 @@ def main():
         "--debug", action="store_true",
         help="Dry-run: log commanded joint positions and deltas but never send to robot"
     )
+    parser.add_argument(
+        "--cameras", action="store_true",
+        help="Record wrist + exterior camera frames as MP4 video alongside joints"
+    )
+    parser.add_argument(
+        "--fps", type=int, default=DEFAULT_FPS,
+        help=f"Recording FPS (default: {DEFAULT_FPS}; use 30 for vision policies)"
+    )
+    parser.add_argument(
+        "--task", type=str, default="Teleop",
+        help="Task description string saved with each frame (default: 'Teleop')"
+    )
+    parser.add_argument(
+        "--dataset-name", type=str, default=None,
+        help="Override dataset directory name (default: per-robot preset)"
+    )
 
     args = parser.parse_args()
+    fps = args.fps
+    max_episode_frames = MAX_EPISODE_SECONDS * fps
 
     config_cls, dataset_repo_id, root_dir, robot_type = _ROBOT_CONFIGS[args.robot]
     config = config_cls()
     if args.use_sim_time:
         config.use_sim_time = True
+    if args.cameras:
+        config.cameras = dict(CAMERA_CONFIGS)
+    if args.dataset_name:
+        dataset_repo_id = f"lerobot/{args.dataset_name}"
+        root_dir = Path(f"data/lerobot/{args.dataset_name}")
     iface = config.ros2_interface
     arm_joint_names = iface.arm_joint_names
     gripper_joint_name: Optional[str] = iface.gripper_joint_name or None
@@ -284,14 +328,21 @@ def main():
             "shape": (6,),
             "names": ["green_x", "green_y", "green_z", "red_x", "red_y", "red_z"],
         }
+    if args.cameras:
+        for cam_key, cam_cfg in CAMERA_CONFIGS.items():
+            dataset_features[cam_key] = {
+                "dtype": "video",
+                "shape": (cam_cfg.height, cam_cfg.width, 3),
+                "names": ["height", "width", "channels"],
+            }
 
     dataset = LeRobotDataset.create(
         repo_id=dataset_repo_id,
-        fps=FPS,
+        fps=fps,
         root=root_dir,
         robot_type=robot_type,
         features=dataset_features,
-        use_videos=False,
+        use_videos=bool(args.cameras),
     )
 
     saved_episodes = 0
@@ -330,9 +381,9 @@ def main():
                 logger.info("Recording. Use input device to move robot. Enter=save, D=discard.")
 
             while not user_input.episode_end_requested:
-                if frame_count >= MAX_EPISODE_FRAMES:
+                if frame_count >= max_episode_frames:
                     logger.warning(
-                        f"Reached max frames ({MAX_EPISODE_FRAMES}). Auto-saving episode."
+                        f"Reached max frames ({max_episode_frames}). Auto-saving episode."
                     )
                     break
 
@@ -389,15 +440,22 @@ def main():
                 frame = {
                     "observation.state": current_state,
                     "action": action_vec,
-                    "task": "Teleop",
+                    "task": args.task,
                 }
                 if env_state is not None:
                     frame["observation.environment_state"] = env_state
+                if args.cameras:
+                    for cam_key in CAMERA_CONFIGS:
+                        img = obs.get(cam_key)
+                        if img is None:
+                            logger.warning(f"Missing camera frame for {cam_key} at frame {frame_count}")
+                            continue
+                        frame[cam_key] = img
                 episode_frames.append(frame)
                 frame_count += 1
 
                 dt = time.perf_counter() - step_start
-                sleep_time = 1.0 / FPS - dt
+                sleep_time = 1.0 / fps - dt
                 if sleep_time > 0:
                     time.sleep(sleep_time)
 
