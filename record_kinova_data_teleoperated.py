@@ -241,7 +241,12 @@ def main():
     )
     parser.add_argument(
         "--cameras", action="store_true",
-        help="Record wrist + exterior camera frames as MP4 video alongside joints"
+        help="Record camera frames as MP4 video alongside joints"
+    )
+    parser.add_argument(
+        "--camera-set", choices=["wrist", "exterior", "both"], default="both",
+        help="Which camera(s) to record when --cameras is set (default: both). "
+             "Use 'wrist' to test spacemouse contention with only the USB3 BRIO active."
     )
     parser.add_argument(
         "--fps", type=int, default=DEFAULT_FPS,
@@ -265,7 +270,14 @@ def main():
     if args.use_sim_time:
         config.use_sim_time = True
     if args.cameras:
-        config.cameras = dict(CAMERA_CONFIGS)
+        if args.camera_set == "both":
+            selected_cams = dict(CAMERA_CONFIGS)
+        elif args.camera_set == "wrist":
+            selected_cams = {"observation.images.wrist": CAMERA_CONFIGS["observation.images.wrist"]}
+        else:  # "exterior"
+            selected_cams = {"observation.images.exterior": CAMERA_CONFIGS["observation.images.exterior"]}
+        config.cameras = selected_cams
+        logger.info(f"Camera set: {args.camera_set} ({list(selected_cams)})")
     if args.dataset_name:
         dataset_repo_id = f"lerobot/{args.dataset_name}"
         root_dir = Path(f"data/lerobot/{args.dataset_name}")
@@ -329,7 +341,7 @@ def main():
             "names": ["green_x", "green_y", "green_z", "red_x", "red_y", "red_z"],
         }
     if args.cameras:
-        for cam_key, cam_cfg in CAMERA_CONFIGS.items():
+        for cam_key, cam_cfg in config.cameras.items():
             dataset_features[cam_key] = {
                 "dtype": "video",
                 "shape": (cam_cfg.height, cam_cfg.width, 3),
@@ -445,7 +457,7 @@ def main():
                 if env_state is not None:
                     frame["observation.environment_state"] = env_state
                 if args.cameras:
-                    for cam_key in CAMERA_CONFIGS:
+                    for cam_key in config.cameras:
                         img = obs.get(cam_key)
                         if img is None:
                             logger.warning(f"Missing camera frame for {cam_key} at frame {frame_count}")
