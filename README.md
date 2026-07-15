@@ -4,6 +4,13 @@ Multi-backend robot interface for the [LeRobot](https://github.com/huggingface/l
 
 Forked from [ycheng517/lerobot-ros](https://github.com/ycheng517/lerobot-ros) and extended with a unified backend architecture.
 
+> **Running on ROS 2 Lyrical Luth / Ubuntu 26.04 with a Kinova Gen3 Lite?**
+> The instructions below target the upstream **Jazzy + Python 3.12 + MoveIt** setup.
+> That combination does **not** work on Lyrical. See
+> **[docs/LYRICAL_KINOVA.md](docs/LYRICAL_KINOVA.md)** for the Lyrical/Python-3.14
+> environment, the required patches, real-hardware bring-up, and known limits
+> (MoveIt is unavailable on Lyrical).
+
 ## Architecture
 
 ```
@@ -54,7 +61,8 @@ obs = robot.backend.get_observation()
 
 **Gripper:**
 - `GripperActionType.TRAJECTORY` — publishes `JointTrajectory` to gripper topic
-- `GripperActionType.ACTION` — sends goals to `GripperActionController`
+- `GripperActionType.ACTION` — `control_msgs/GripperCommand` goals (classic `GripperActionController`)
+- `GripperActionType.PARALLEL_ACTION` — `control_msgs/ParallelGripperCommand` goals (goal is a `JointState`); required for the Gen3 Lite on **Lyrical**, where `position_controllers/GripperActionController` was removed in favor of `parallel_gripper_action_controller/GripperActionController`. See [docs/LYRICAL_KINOVA.md](docs/LYRICAL_KINOVA.md).
 
 ## Scripts
 
@@ -133,6 +141,11 @@ Modified ros2_kortex files are backed up in `forked_cortex/`.
 - [MoveIt 2](https://moveit.ai/install-moveit2/binary) (for cartesian velocity control)
 - [pinocchio](https://github.com/stack-of-tasks/pinocchio) (for spacemouse IK)
 
+> **On ROS 2 Lyrical Luth (Ubuntu 26.04):** use Python **3.14**, not 3.12, and
+> **MoveIt is unavailable** (so the `CARTESIAN_VELOCITY`/Servo path — Annin AR4 —
+> is not usable there). The Gen3 Lite pipeline does not need MoveIt. Full setup in
+> [docs/LYRICAL_KINOVA.md](docs/LYRICAL_KINOVA.md).
+
 ## Install
 
 ```bash
@@ -145,6 +158,10 @@ git clone <this-repo>
 cd lerobot-ros
 pip install -e lerobot_robot_ros lerobot_teleoperator_devices
 ```
+
+> **Lyrical / Ubuntu 26.04:** the above (Python 3.12 + Jazzy) will not import
+> `rclpy` on Lyrical. Use the Python-3.14 env instead — see
+> [docs/LYRICAL_KINOVA.md §3](docs/LYRICAL_KINOVA.md#3-environment-setup-lerobot-ros-314).
 
 ## Adding a New Robot
 

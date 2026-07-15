@@ -31,3 +31,30 @@ python ./eval_kinova_reach.py
 ## Compile the xacro into urdf:
 xacro ~/workspace/ros2_kortex_ws/src/ros2_kortex/kortex_description/robots/gen3_lite_gen3_lite_2f.xacro > /tmp/gen3_lite.urdf
 python record_kinova_data_teleoperated.py --input spacemouse --urdf /tmp/gen3_lite.urdf
+
+
+########################################################################
+# REAL Gen3 Lite on ROS 2 Lyrical (Ubuntu 26.04). Full notes + the "why":
+#   docs/LYRICAL_KINOVA.md
+########################################################################
+
+# Session env (Lyrical needs Python 3.14 to import rclpy + torch together):
+conda activate lerobot-ros-314
+source /opt/ros/lyrical/setup.bash
+source ~/workspace/ros2_kortex_ws/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+
+# HOME THE ARM FIRST (Kinova web app at http://192.168.1.10). If a joint is outside
+# its URDF soft limit, joint_trajectory_controller won't activate, which also stalls
+# the gripper (see docs §7.1).
+
+# Bring up the real arm:
+ros2 launch kortex_bringup gen3_lite.launch.py robot_ip:=192.168.1.10 launch_rviz:=false
+
+# Gripper test (Lyrical gripper action is ParallelGripperCommand, goal is a JointState):
+ros2 action send_goal /gen3_lite_2f_gripper_controller/gripper_cmd \
+  control_msgs/action/ParallelGripperCommand \
+  "{command: {name: [right_finger_bottom_joint], position: [0.5]}}"   # 0=open, 0.85=closed
+
+# Cartesian EEF move (twist is in the TOOL frame -> closed-loop world-Z servo):
+python real_eef_move_z.py

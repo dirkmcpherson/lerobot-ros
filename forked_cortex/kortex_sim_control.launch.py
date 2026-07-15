@@ -145,16 +145,23 @@ def launch_setup(context, *args, **kwargs):
         )
     )
 
+    # Lyrical: gz_ros2_control no longer forwards per-controller parameter
+    # sections from the plugin <parameters> yaml to the individual controllers
+    # (only the controller_manager: section is read), so JointTrajectoryController
+    # came up with an empty 'joints' param and failed init. Pass the controllers
+    # yaml directly to each spawner via --param-file so controllers get their params.
     robot_traj_controller_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=[robot_traj_controller, "-c", "/controller_manager"],
+        arguments=[robot_traj_controller, "-c", "/controller_manager",
+                   "--param-file", robot_controllers],
     )
 
     robot_pos_controller_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=[robot_pos_controller, "--inactive", "-c", "/controller_manager"],
+        arguments=[robot_pos_controller, "--inactive", "-c", "/controller_manager",
+                   "--param-file", robot_controllers],
     )
 
     robot_model = robot_type.perform(context)
@@ -165,14 +172,16 @@ def launch_setup(context, *args, **kwargs):
     robot_hand_controller_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=[robot_hand_controller, "-c", "/controller_manager"],
+        arguments=[robot_hand_controller, "-c", "/controller_manager",
+                   "--param-file", robot_controllers],
         condition=UnlessCondition(is_gen3_lite),
     )
 
     robot_hand_lite_controller_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=[robot_lite_hand_controller, "-c", "/controller_manager"],
+        arguments=[robot_lite_hand_controller, "-c", "/controller_manager",
+                   "--param-file", robot_controllers],
         condition=IfCondition(is_gen3_lite),
     )
 
@@ -205,7 +214,7 @@ def launch_setup(context, *args, **kwargs):
             "-y",
             "0.0",
             "-z",
-            "0.05",
+            "0.3",
             "-R",
             "0.0",
             "-P",
@@ -240,112 +249,6 @@ def launch_setup(context, *args, **kwargs):
         output="screen",
     )
 
-    # Define a small red task box wrapped in proper SDF tags
-    task_box_sdf_1 = """
-    <?xml version="1.0" ?>
-    <sdf version="1.8">
-      <model name="task_box">
-        <static>false</static>
-        <pose>1.5 0.0 0.5 0 0 0</pose>
-        <link name="link">
-          <inertial>
-            <mass>0.05</mass>
-            <inertia>
-              <ixx>0.00001</ixx><ixy>0</ixy><ixz>0</ixz>
-              <iyy>0.00001</iyy><iyz>0</iyz><izz>0.00001</izz>
-            </inertia>
-          </inertial>
-          <collision name="collision">
-            <geometry><box><size>0.05 0.05 0.05</size></box></geometry>
-          </collision>
-          <visual name="visual">
-            <geometry><box><size>0.05 0.05 0.05</size></box></geometry>
-            <material>
-              <ambient>0 1 0 1</ambient>
-              <diffuse>0 1 0 1</diffuse>
-              <specular>0.5 0.5 0.5 1</specular>
-            </material>
-          </visual>
-        </link>
-        <plugin filename="gz-sim-pose-publisher-system" name="gz::sim::systems::PosePublisher">
-          <publish_link_pose>true</publish_link_pose>
-          <use_pose_vector_msg>true</use_pose_vector_msg>
-          <publish_nested_model_pose>true</publish_nested_model_pose>
-        </plugin>
-      </model>
-    </sdf>
-    """
-
-    task_box_sdf_2 = """
-    <?xml version="1.0" ?>
-    <sdf version="1.8">
-      <model name="task_box">
-        <static>false</static>
-        <pose>-1.5 0.0 0.5 0 0 0</pose>
-        <link name="link">
-          <inertial>
-            <mass>0.05</mass>
-            <inertia>
-              <ixx>0.00001</ixx><ixy>0</ixy><ixz>0</ixz>
-              <iyy>0.00001</iyy><iyz>0</iyz><izz>0.00001</izz>
-            </inertia>
-          </inertial>
-          <collision name="collision">
-            <geometry><box><size>0.05 0.05 0.05</size></box></geometry>
-          </collision>
-          <visual name="visual">
-            <geometry><box><size>0.05 0.05 0.05</size></box></geometry>
-            <material>
-              <ambient>1 0 0 1</ambient>
-              <diffuse>1 0 0 1</diffuse>
-              <specular>0.5 0.5 0.5 1</specular>
-            </material>
-          </visual>
-        </link>
-        <plugin filename="gz-sim-pose-publisher-system" name="gz::sim::systems::PosePublisher">
-          <publish_link_pose>true</publish_link_pose>
-          <use_pose_vector_msg>true</use_pose_vector_msg>
-          <publish_nested_model_pose>true</publish_nested_model_pose>
-        </plugin>
-      </model>
-    </sdf>
-    """
-
-    spawn_task_box_1 = Node(
-        package="ros_gz_sim",
-        executable="create",
-        output="screen",
-        arguments=[
-            "-string", task_box_sdf_1, 
-            "-name", "task_box_green", # Unique name
-            "-x", "0.5", "-y", "0.0", "-z", "0.5" # Explicit position
-        ],
-        condition=IfCondition(sim_gazebo),
-    )
-
-    spawn_task_box_2 = Node(
-        package="ros_gz_sim",
-        executable="create",
-        output="screen",
-        arguments=[
-            "-string", task_box_sdf_2, 
-            "-name", "task_box_red", # Unique name
-            "-x", "0.5", "-y", "0.1", "-z", "0.5" # Explicit position
-        ],
-        condition=IfCondition(sim_gazebo),
-    )
-
-    task_box_bridge = Node(
-            package="ros_gz_bridge",
-            executable="parameter_bridge",
-            arguments=[
-                "/model/task_box_green/pose@geometry_msgs/msg/Pose@gz.msgs.Pose",
-                "/model/task_box_red/pose@geometry_msgs/msg/Pose@gz.msgs.Pose"
-            ],
-            output="screen",
-            condition=IfCondition(sim_gazebo),
-        )
-
     nodes_to_start = [
         bridge,
         robot_state_publisher_node,
@@ -359,10 +262,6 @@ def launch_setup(context, *args, **kwargs):
         gz_launch_description,
         gz_spawn_entity,
         gazebo_bridge,
-        # --- Added Nodes ---
-        spawn_task_box_1,
-        spawn_task_box_2,
-        task_box_bridge,
     ]
 
     return nodes_to_start

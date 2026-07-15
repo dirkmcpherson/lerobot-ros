@@ -25,7 +25,8 @@ class ActionType(Enum):
 
 class GripperActionType(Enum):
     TRAJECTORY = "trajectory"  # Use JointTrajectoryController for gripper
-    ACTION = "action"          # Use GripperActionClient
+    ACTION = "action"          # Use GripperActionClient (control_msgs/GripperCommand)
+    PARALLEL_ACTION = "parallel_action"  # parallel_gripper_action_controller (control_msgs/ParallelGripperCommand)
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +186,11 @@ class KinovaGen3LiteConfig(ROS2BackendConfig):
             max_joint_positions=[2.68, 2.61, 2.61, 2.6, 2.53, 2.6],
             gripper_open_position=0.0,
             gripper_close_position=0.85,
-            gripper_action_type=GripperActionType.ACTION,
+            # Lyrical: gen3_lite_2f_gripper_controller is
+            # parallel_gripper_action_controller/GripperActionController, whose
+            # action is control_msgs/ParallelGripperCommand (goal is a JointState),
+            # not the classic GripperCommand. (position_controllers was removed.)
+            gripper_action_type=GripperActionType.PARALLEL_ACTION,
         ),
     )
 

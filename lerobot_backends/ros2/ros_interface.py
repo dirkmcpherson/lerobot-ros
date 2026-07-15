@@ -18,7 +18,7 @@ import time
 
 import rclpy
 from builtin_interfaces.msg import Duration
-from control_msgs.action import GripperCommand
+from control_msgs.action import GripperCommand, ParallelGripperCommand
 from lerobot.utils.errors import DeviceNotConnectedError
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -30,7 +30,9 @@ from std_msgs.msg import Float64MultiArray
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from .config import ActionType, GripperActionType, ROS2InterfaceConfig
-from .moveit_servo import MoveIt2Servo  # noqa: E402
+# NOTE: MoveIt2Servo is imported lazily inside connect() (see CARTESIAN_VELOCITY
+# branch) so backends that don't use cartesian-velocity control (e.g. the
+# joint-trajectory Kinova Gen3 Lite) don't require moveit_msgs to be installed.
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +91,7 @@ class ROS2Interface:
                 JointTrajectory, self.config.arm_topic, 10
             )
         elif self.action_type == ActionType.CARTESIAN_VELOCITY:
+            from .moveit_servo import MoveIt2Servo  # requires moveit_msgs (apt: ros-<distro>-moveit-msgs)
             self.moveit2_servo = MoveIt2Servo(
                 node=self.robot_node,
                 frame_id=self.config.base_link,
@@ -100,6 +103,17 @@ class ROS2Interface:
                 self.gripper_traj_pub = self.robot_node.create_publisher(
                     JointTrajectory, self.config.gripper_traj_topic, 10
                 )
+            elif self.config.gripper_action_type == GripperActionType.PARALLEL_ACTION:
+                self.gripper_action_client = ActionClient(
+                    self.robot_node,
+                    ParallelGripperCommand,
+                    self.config.gripper_topic,
+                    callback_group=ReentrantCallbackGroup(),
+                )
+                # Goal command is a sensor_msgs/JointState; the joint name is fixed
+                # for the life of the client, only the position array changes per call.
+                self._goal_msg = ParallelGripperCommand.Goal()
+                self._goal_msg.command.name = [self.config.gripper_joint_name]
             else:
                 self.gripper_action_client = ActionClient(
                     self.robot_node,
@@ -239,7 +253,12 @@ class ROS2Interface:
 
             # send_goal_async: fire-and-forget so the control loop is never blocked
             # waiting for the gripper to physically reach its target.
-            self._goal_msg.command.position = gripper_goal
+            if self.config.gripper_action_type == GripperActionType.PARALLEL_ACTION:
+                # ParallelGripperCommand goal is a JointState; command.name was set
+                # at connect() time, here we set the per-call target position.
+                self._goal_msg.command.position = [gripper_goal]
+            else:
+                self._goal_msg.command.position = gripper_goal
             self.gripper_action_client.send_goal_async(self._goal_msg)
             return True
 
