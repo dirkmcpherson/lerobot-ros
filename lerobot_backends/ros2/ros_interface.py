@@ -18,7 +18,7 @@ import time
 
 import rclpy
 from builtin_interfaces.msg import Duration
-from control_msgs.action import GripperCommand, ParallelGripperCommand
+from control_msgs.action import FollowJointTrajectory, GripperCommand, ParallelGripperCommand
 from lerobot.utils.errors import DeviceNotConnectedError
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -62,6 +62,7 @@ class ROS2Interface:
         self.robot_node: Node | None = None
         self.pos_cmd_pub: Publisher | None = None
         self.traj_cmd_pub: Publisher | None = None
+        self.traj_action_client: ActionClient | None = None
         self.gripper_action_client: ActionClient | None = None
         self.gripper_traj_pub: Publisher | None = None
         self.executor: Executor | None = None
@@ -87,9 +88,22 @@ class ROS2Interface:
                 Float64MultiArray, self.config.position_topic, 10
             )
         elif self.action_type == ActionType.JOINT_TRAJECTORY:
-            self.traj_cmd_pub = self.robot_node.create_publisher(
-                JointTrajectory, self.config.arm_topic, 10
-            )
+            if self.config.use_trajectory_action:
+                # Prefer the FollowJointTrajectory ACTION over the command topic.
+                # On some setups (notably ROS 2 Lyrical) the JTC command topic
+                # silently drops one-shot trajectories, whereas the action interface
+                # delivers reliably and reports an explicit result code.
+                action_name = self.config.arm_topic.rsplit("/", 1)[0] + "/follow_joint_trajectory"
+                self.traj_action_client = ActionClient(
+                    self.robot_node,
+                    FollowJointTrajectory,
+                    action_name,
+                    callback_group=ReentrantCallbackGroup(),
+                )
+            else:
+                self.traj_cmd_pub = self.robot_node.create_publisher(
+                    JointTrajectory, self.config.arm_topic, 10
+                )
         elif self.action_type == ActionType.CARTESIAN_VELOCITY:
             from .moveit_servo import MoveIt2Servo  # requires moveit_msgs (apt: ros-<distro>-moveit-msgs)
             self.moveit2_servo = MoveIt2Servo(
@@ -137,6 +151,15 @@ class ROS2Interface:
         self.executor_thread.start()
         time.sleep(3)  # Give some time to connect to services and receive messages
 
+        if self.traj_action_client is not None:
+            if not self.traj_action_client.wait_for_server(timeout_sec=5.0):
+                logger.warning(
+                    "Joint-trajectory action server not available after 5s. "
+                    "Joint commands may be dropped."
+                )
+            else:
+                logger.info("Joint-trajectory action server connected.")
+
         if self.gripper_action_client is not None:
             if not self.gripper_action_client.wait_for_server(timeout_sec=5.0):
                 logger.warning(
@@ -181,17 +204,30 @@ class ROS2Interface:
             )
 
         if self.action_type == ActionType.JOINT_TRAJECTORY:
-            if self.traj_cmd_pub is None:
-                raise DeviceNotConnectedError("Trajectory command publisher is not initialized.")
-            msg = JointTrajectory()
-            msg.joint_names = self.config.arm_joint_names
             point = JointTrajectoryPoint()
             point.positions = joint_positions
             sec = int(time_from_start_sec)
             nanosec = int((time_from_start_sec - sec) * 1e9)
             point.time_from_start = Duration(sec=sec, nanosec=nanosec)
-            msg.points = [point]
-            self.traj_cmd_pub.publish(msg)
+
+            if self.traj_action_client is not None:
+                # Reliable path: send as a FollowJointTrajectory goal. Fire-and-forget
+                # (send_goal_async) so the control loop never blocks; a new goal preempts
+                # the previous one, which is the desired behavior for streaming waypoints.
+                if not self.traj_action_client.server_is_ready():
+                    logger.warning("Joint-trajectory action server not ready, skipping command.")
+                    return
+                goal = FollowJointTrajectory.Goal()
+                goal.trajectory.joint_names = self.config.arm_joint_names
+                goal.trajectory.points = [point]
+                self.traj_action_client.send_goal_async(goal)
+            elif self.traj_cmd_pub is not None:
+                msg = JointTrajectory()
+                msg.joint_names = self.config.arm_joint_names
+                msg.points = [point]
+                self.traj_cmd_pub.publish(msg)
+            else:
+                raise DeviceNotConnectedError("Trajectory command interface is not initialized.")
         else:
             if self.pos_cmd_pub is None:
                 raise DeviceNotConnectedError("Position command publisher is not initialized.")

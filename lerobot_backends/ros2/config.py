@@ -63,6 +63,12 @@ class ROS2InterfaceConfig:
 
     gripper_action_type: GripperActionType = GripperActionType.TRAJECTORY
 
+    # For JOINT_TRAJECTORY, send goals via the FollowJointTrajectory action
+    # (derived from arm_topic's controller namespace) instead of publishing to the
+    # command topic. The action is reliable where the topic can silently drop
+    # one-shot trajectories (e.g. on ROS 2 Lyrical).
+    use_trajectory_action: bool = True
+
     # Topic names
     arm_topic: str = "/arm_controller/joint_trajectory"
     gripper_topic: str = "/gripper_controller/gripper_cmd"

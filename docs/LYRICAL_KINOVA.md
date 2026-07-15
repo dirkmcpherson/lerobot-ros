@@ -9,9 +9,12 @@ The upstream `README.md` targets ROS 2 **Jazzy** + Python **3.12** + MoveIt. Non
 of that combination is usable on Lyrical as-is; the sections below are the delta.
 
 > **TL;DR** — The arm runs. Joint state, joint-trajectory control, the twist
-> (Cartesian-velocity) controller, and the gripper all work on real hardware. The
-> cost was a Python-3.14 conda environment and five patches (env, gripper action
-> type, controller type, spawner `--param-file`, MoveIt lazy-import). MoveIt is
+> (Cartesian-velocity) controller, and the gripper all work on real hardware, and
+> the project's own lerobot backend (`BackendRobot`) is verified end-to-end against
+> the physical arm (§7.4), reliably across repeated runs. The cost was a
+> Python-3.14 conda environment and six patches (env, gripper action type,
+> controller type, spawner `--param-file`, MoveIt lazy-import, joint-trajectory
+> action interface), plus a one-line URDF gripper-limit loosening. MoveIt is
 > **not available on Lyrical**, so the MoveIt-Servo / `CARTESIAN_VELOCITY` path is
 > unavailable — but the Gen3 Lite pipeline does not need it.
 
@@ -66,12 +69,25 @@ system `rclpy` imports cleanly alongside a modern `torch`.
 
 ## 3. Environment setup (`lerobot-ros-314`)
 
+A pinned, reproducible spec of the working env lives at
+[`environment-lyrical-314.yml`](../environment-lyrical-314.yml) (128 PyPI packages,
+generated from the live env). **It deliberately excludes all ROS packages** —
+`rclpy`, `tf2_*`, `control_msgs`, etc. are provided by *sourcing* system Lyrical,
+not by pip, and are not on PyPI. Recreate with:
+
 ```bash
-# Create against conda-forge only (avoids the Anaconda commercial-ToS default channels)
+conda env create -f environment-lyrical-314.yml
+conda activate lerobot-ros-314
+pip install -e lerobot_robot_ros lerobot_teleoperator_devices   # local packages
+```
+
+From scratch (how it was originally built), against conda-forge only (avoids the
+Anaconda commercial-ToS default channels):
+
+```bash
 conda create -y -n lerobot-ros-314 --override-channels -c conda-forge python=3.14
 conda activate lerobot-ros-314
-
-# ML stack with cp314 wheels (see scratch reqs used during bring-up)
+# ML stack with cp314 wheels
 pip install --no-deps torch numpy==2.3.5 lerobot pin eigenpy coal ...
 ```
 
@@ -167,6 +183,27 @@ Gen3 Lite (`JOINT_TRAJECTORY`) backend imports cleanly without it.
 See §3 — this is a patch in the sense that the documented Python-3.12 install is
 not usable on Lyrical.
 
+### 4.5 Joint trajectory via the ACTION interface, not the command topic
+
+**Why.** The backend published `JointTrajectory` messages to the JTC **command
+topic** (`/joint_trajectory_controller/joint_trajectory`). On Lyrical this is
+**unreliable** — one-shot trajectories are silently dropped (the joint doesn't
+move, no error). It was intermittent: the same code moved the arm once and then
+stopped, which made it look like a servoing-mode or joint-limit problem. The
+tell: commanding the identical trajectory through the JTC **action**
+(`follow_joint_trajectory`) returned `error_code=0 SUCCESSFUL` and moved the arm
+every single time.
+
+**How.** `ros_interface.py` gained a `FollowJointTrajectory` action-client path for
+`JOINT_TRAJECTORY`, selected by `ROS2InterfaceConfig.use_trajectory_action`
+(default **True**). The action name is derived from `arm_topic`'s controller
+namespace (`…/follow_joint_trajectory`). Goals are sent fire-and-forget
+(`send_goal_async`); a new goal preempts the previous, which is the right behavior
+for streaming waypoints. The old topic publisher remains available via
+`use_trajectory_action=False`. Verified: the end-to-end backend test moved
+`joint_6` identically across **3/3** consecutive runs (previously it succeeded
+once then silently stopped).
+
 ---
 
 ## 5. What is currently impossible / blocked
@@ -255,10 +292,13 @@ ros2 action send_goal /gen3_lite_2f_gripper_controller/gripper_cmd \
   "{command: {name: [right_finger_bottom_joint], position: [0.5]}}"
 ```
 
-**Known issue — URDF gripper lower limit is a hair too tight.** On a full open the
-real gripper overshoots to ≈ `-0.009 rad`, below the URDF limit `[0, 0.85]`. The
-joint limiter catches this and **deactivates the gripper controller**. Recommend
-loosening the lower limit (e.g. to `-0.02`) so a full open survives.
+**URDF gripper lower limit was a hair too tight (now fixed).** On a full open the
+real gripper overshoots to ≈ `-0.009 rad`, below the original URDF limit `[0, 0.85]`.
+The joint limiter caught this and **deactivated the gripper controller**. Fix: the
+lower limit was loosened `0.0 → -0.02` in
+`kortex_description/grippers/gen3_lite_2f/urdf/gen3_lite_2f_macro.xacro` (the active
+`right_finger_bottom_joint` block; backed up to `forked_cortex/`). The install tree
+is symlinked to source, so a driver relaunch picks it up with no rebuild.
 
 ### 7.3 Cartesian EEF motion — mind the TOOL frame
 
@@ -284,15 +324,27 @@ within 0.2 mm of start, no drift.
 - Gripper actuation via `ParallelGripperCommand`.
 - Cartesian EEF ±0.05 m via the closed-loop twist servo.
 - JTC activates and holds after homing.
+- **Full lerobot backend round-trip** — `BackendRobot(KinovaGen3LiteConfig())`
+  `connect()` → `get_observation()` → `send_action()`, driving both the gripper
+  (partial-close → open) and a bounded `joint_6` trajectory (+0.10 rad, returned to
+  within 0.3 mrad). This is the project's *own* application path, not the CLI, and
+  it runs **reliably across repeated invocations** now that joints go through the
+  `FollowJointTrajectory` action (§4.5) instead of the flaky command topic.
+  Script: [`real_kinova_backend_test.py`](../real_kinova_backend_test.py). Observed:
 
-### 7.5 Not yet verified
+  ```
+  gripper 0.5 close -> 0.5003 ;  0.1 open -> 0.0999
+  joint_6 +0.10 -> moved +0.0997 ;  return -> residual -0.0003 rad
+  ```
 
-The gripper and Cartesian moves above were driven via the `ros2 action`/`topic` CLI
-and the standalone servo script — **not** through `lerobot_backends/ros2.ROS2Interface`
-on the physical arm, and no JTC joint-space *trajectory* has been commanded on
-hardware (only hold). The code paths are patched and sim-validated; the remaining
-work is a single end-to-end `ROS2Interface` run against the real arm (gripper + a
-small bounded joint move).
+### 7.5 Status / still untested on hardware
+
+The project's backend path is now **verified end-to-end on the physical arm** (§7.4).
+What remains untested on hardware (not blocked — just not yet run):
+
+- cameras in the observation dict (none wired to this box yet);
+- a full `record_*` data-collection / policy `eval_*` loop at control rate;
+- multi-joint trajectories beyond the single-joint smoke test.
 
 ---
 
