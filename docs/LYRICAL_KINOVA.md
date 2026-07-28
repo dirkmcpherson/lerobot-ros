@@ -12,11 +12,14 @@ of that combination is usable on Lyrical as-is; the sections below are the delta
 > (Cartesian-velocity) controller, and the gripper all work on real hardware, and
 > the project's own lerobot backend (`BackendRobot`) is verified end-to-end against
 > the physical arm (§7.4), reliably across repeated runs. The cost was a
-> Python-3.14 conda environment and six patches (env, gripper action type,
+> Python-3.14 conda environment and seven patches (env, gripper action type,
 > controller type, spawner `--param-file`, MoveIt lazy-import, joint-trajectory
-> action interface), plus a one-line URDF gripper-limit loosening. MoveIt is
-> **not available on Lyrical**, so the MoveIt-Servo / `CARTESIAN_VELOCITY` path is
-> unavailable — but the Gen3 Lite pipeline does not need it.
+> action interface, and a draccus/Py3.14 config-loading shim), plus a one-line URDF
+> gripper-limit loosening. MoveIt is **not available on Lyrical**, so the
+> MoveIt-Servo / `CARTESIAN_VELOCITY` path is unavailable — but the Gen3 Lite
+> pipeline does not need it. The offline learning half (record → DP train →
+> checkpoint → inference) is validated in software on this box (§9); real *training*
+> needs a GPU machine (~2.8 s/step on CPU), while collection and deployment run here.
 
 ---
 
@@ -53,7 +56,7 @@ system `rclpy` imports cleanly alongside a modern `torch`.
 | ROS driver | `kortex_driver`, `kortex_bringup`, `kortex_description` | **built from source** in `~/workspace/ros2_kortex_ws` (no apt binaries exist for Lyrical) |
 | Control | `joint_state_broadcaster`, `joint_trajectory_controller`, `twist_controller` (picknik), `gen3_lite_2f_gripper_controller`, `fault_controller` | all activate on real hardware |
 | Python env | conda **`lerobot-ros-314`** (Py 3.14): `rclpy` + `torch 2.10.0` + `lerobot 0.5.0` + `pinocchio` + `numpy 2.3.5` | one process; **CPU only** (no GPU on this box) |
-| App | `lerobot_backends/ros2` (`ROS2Interface`) | patched (§4); sim-validated; real-hardware end-to-end run still pending (§6) |
+| App | `lerobot_backends/ros2` (`ROS2Interface`) | patched (§4); sim-validated; **verified end-to-end on real hardware** (§7.4). Offline DP train/deploy pipeline validated in software (§9) |
 
 ### On the "precompiled vs. source" question
 - **Kinova's SDK is precompiled and works** — `kortex_api` is a thin CMake shim
@@ -204,6 +207,37 @@ for streaming waypoints. The old topic publisher remains available via
 `joint_6` identically across **3/3** consecutive runs (previously it succeeded
 once then silently stopped).
 
+### 4.6 draccus config loading on Python 3.14 (`lerobot_py314_compat.py`)
+
+**Why.** lerobot 0.5.0 loads every policy/train config through
+`draccus.parse(cls, config_file, args=[])`, which builds an `argparse` parser even
+when reading purely from a file. draccus 0.8.0 passes a field's *type annotation*
+straight to `argparse.add_argument(type=...)`. For `Optional[X]` / `X | None`
+fields (e.g. `root: str | None`, `input_features: Dict[str, PolicyFeature] | None`)
+that annotation is a **non-callable union object**. On Python ≤ 3.13 `argparse`
+only invokes `type` when it actually parses a string, so with `args=[]` it was
+never called and this silently worked. **Python 3.14's `add_argument` validates
+callability eagerly**, so it raises `TypeError: X | None is not callable` at
+parser-construction time — breaking both the `lerobot-train` CLI *and*
+`Policy.from_pretrained` (i.e. loading a checkpoint for eval/deployment).
+
+**How.** [`lerobot_py314_compat.py`](../lerobot_py314_compat.py) wraps
+`draccus.utils.canonicalize_union` so a non-callable (Optional/union) result is
+replaced by a callable — the inner type for a simple `Optional[X]`, or a harmless
+`str` placeholder otherwise. draccus only *invokes* this `type` when parsing a CLI
+*string* argument; the file-loading path (`args=[]`) never calls it, so the
+placeholder preserves decoding behavior exactly. Import the shim **before** any
+lerobot config load; the real deploy script `eval_kinova_reach.py` already does.
+
+This fixes **config-file loading** (checkpoints → eval/deploy). The
+`lerobot-train` **CLI** has a *second*, deeper draccus/3.14 bug in the union/choice
+wrapper for polymorphic config fields (`env: EnvConfig | None`,
+`policy: PreTrainedConfig | None` → `AttributeError: 'EnvConfig' has no attribute
+'__args__'`) that the shim does not cover. The clean workaround is to **drive
+training from Python**, not the CLI: build a `TrainPipelineConfig` in code and call
+`train.__wrapped__(cfg)` (the `@parser.wrap()` decorator only adds CLI parsing; the
+wrapped function is the actual trainer). See [`smoke_train.py`](../smoke_train.py).
+
 ---
 
 ## 5. What is currently impossible / blocked
@@ -223,7 +257,8 @@ the gripper action, and gets Cartesian motion directly from the Kinova
 
 Other constraints:
 
-- **No GPU** — `torch` is CPU-only; policy inference/training is slow, not blocked.
+- **No GPU** — `torch` is CPU-only; inference is fine but DP training is ~2.8 s/step
+  (§9), so real training must run on a GPU box. Collection and deployment stay here.
 - **Pinned deps are permanently impossible on 3.14** (`torch < 2.8` has no cp314
   wheels). `lerobot 0.5.0` + `torch 2.10` is the supported combination here.
 
@@ -339,12 +374,18 @@ within 0.2 mm of start, no drift.
 
 ### 7.5 Status / still untested on hardware
 
-The project's backend path is now **verified end-to-end on the physical arm** (§7.4).
-What remains untested on hardware (not blocked — just not yet run):
+The project's backend path is now **verified end-to-end on the physical arm** (§7.4),
+and the offline learning pipeline (record-format → DP train → checkpoint → inference)
+is **verified in software on this box** (§9). What remains untested on hardware (not
+blocked — just not yet run):
 
 - cameras in the observation dict (none wired to this box yet);
-- a full `record_*` data-collection / policy `eval_*` loop at control rate;
+- a full `record_*` data-collection / policy `eval_*` loop at control rate on the arm;
 - multi-joint trajectories beyond the single-joint smoke test.
+
+The one thing that is *impractical* rather than untested: **training a real policy on
+this box** — CPU-only DP is ~2.8 s/step (§9), so a 100 k-step run is ~3 days. Real
+training belongs on a GPU machine; collection and deployment stay here.
 
 ---
 
@@ -357,3 +398,56 @@ What remains untested on hardware (not blocked — just not yet run):
   zero-twist on exit.
 - Before relaunching the driver, stop the previous one so it releases robot control
   (otherwise homing from the web app fights the running session).
+
+---
+
+## 9. Offline policy pipeline — software smoke test (no arm, no ROS, no camera)
+
+The real-hardware work above proves the **ROS ↔ arm** boundary. The *other* half of
+the project — record a LeRobot dataset, train a Diffusion Policy, load the checkpoint
+and run inference — had never been exercised on **this** stack (lerobot 0.5.0, Python
+3.14, CPU-only torch). Because that half needs no robot, it is validated in pure
+software here so real-hardware time isn't spent debugging library plumbing. There is
+no point running the full loop end-to-end on the arm until we can actually train a
+policy — which needs a GPU box — so this isolates and confirms everything *except* the
+training compute.
+
+Three scripts, run in order, all CPU-only and hardware-free:
+
+| Step | Script | Validates |
+|------|--------|-----------|
+| 1. Synthesize dataset | [`smoke_synth_dataset.py`](../smoke_synth_dataset.py) | `LeRobotDataset.create/add_frame/save_episode` writes a valid **v3.0** dataset on lerobot 0.5.0 (state-only, `use_videos=False`) |
+| 2. Train DP on CPU | [`smoke_train.py`](../smoke_train.py) | DiffusionPolicy trains on the **state + `environment_state`** (no-image) branch; checkpoint + processor artifacts are written; gives the CPU throughput number |
+| 3. Inference round-trip | [`smoke_infer.py`](../smoke_infer.py) | `DiffusionPolicy.from_pretrained` + `PolicyProcessorPipeline` pre/post round-trip (the exact path `eval_kinova_reach.py` uses) yields a finite action |
+
+The synthetic dataset deliberately matches the **real Gen3 Lite feature signature**
+(7-dim `observation.state` = 6 joints + gripper, 7-dim `observation.environment_state`
+target, 7-dim `action`) so the schema and trained-policy config transfer directly to a
+real `record_*` → train run later; only the *data* is synthetic (a trivial reach).
+
+```bash
+conda activate lerobot-ros-314     # Python 3.14
+python smoke_synth_dataset.py       # -> data/lerobot/kinova_gen3_lite_smoke (900 frames, v3.0)
+python smoke_train.py 200 16        # 200 steps, batch 16, CPU -> outputs/train/gen3_lite_smoke
+python smoke_infer.py               # loads checkpoint, one select_action, prints a 7-dim action
+```
+
+### What it established
+- **Dataset format works** on 0.5.0 — writes and reloads a v3.0 dataset cleanly.
+- **State-only DP is trainable** — DiffusionPolicy accepts `state + environment_state`
+  with no camera (its `validate_features` requires "at least one image *or*
+  `environment_state`"). Loss descended (1.20 → 1.10 in 20 steps) and a checkpoint was
+  written. So a **camera is needed for a *meaningful* task, not to close the loop.**
+- **Deployment round-trip works** — checkpoint → processor → `select_action` → action,
+  the same path the real eval uses (once the Py3.14 draccus shim from §4.6 is imported).
+- **CPU training throughput: ~2.8 s/step** at batch 16 for the default DP (≈249 M
+  params). That is the go/no-go number: **100 k steps ≈ 78 h (~3 days)** on this box →
+  **real training must run on a GPU machine.** Collection and deployment stay here.
+
+### Gotchas surfaced (all fixed or documented)
+- `Policy.from_pretrained` and the `lerobot-train` CLI both hit the **Python-3.14
+  draccus** bug — see §4.6. The shim fixes checkpoint loading; training is driven from
+  Python (`train.__wrapped__(cfg)`) rather than the CLI.
+- DP windowing (`horizon=16`, `n_obs_steps=2`, `drop_n_last_frames=7`) means episodes
+  must be well over ~23 frames or a dataset yields **zero** training samples; the
+  synthetic episodes are 60 frames for margin.

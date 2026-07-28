@@ -4,6 +4,7 @@ import torch
 import numpy as np
 from pathlib import Path
 
+import lerobot_py314_compat  # noqa: F401  (Py3.14: patch draccus before from_pretrained)
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.processor.pipeline import PolicyProcessorPipeline
 from lerobot.utils.utils import init_logging
