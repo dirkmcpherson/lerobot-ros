@@ -126,6 +126,27 @@ ros2 launch kortex_bringup kortex_sim_control.launch.py \
 
 Modified ros2_kortex files are backed up in `forked_cortex/`.
 
+## Gen3 sweep task (gen3-kinesthetic-teaching-ros2)
+
+Diffusion policy on the Gazebo sweep task of
+[gen3-kinesthetic-teaching-ros2](https://github.com/AABL-Lab/gen3-kinesthetic-teaching-ros2),
+which carries this repo as its `lerobot-ros` submodule (the scripts find the parent repo
+automatically). Sim setup is that repo's `native/README.md`. Observations are the 7 arm
+joints plus the xyz of all 15 cubes (`observation.environment_state`, a sim-only oracle);
+actions are the joint controller's reference one frame ahead, at 10 Hz.
+
+```bash
+# in the teaching repo: native/sim_up.sh            (headless sim)
+python record_gen3_sweep_sim.py --episodes 50        # scripted demos -> data/lerobot/gen3_sweep_sim
+bash train_gen3_sweep_sim.sh                         # 20k steps, ~26 min on an RTX 3080
+python eval_gen3_sweep_sim.py --episodes 10          # cubes swept / 15 from unseen start poses
+# in the teaching repo: GUI=1 native/sim_up.sh       (GUI on a virtual display)
+python video_gen3_sweep_sim.py outputs/gen3_sweep_sim_demo_vs_dp.mp4 --seeds 1000 1001 1002
+```
+
+Shared constants, features and ROS plumbing: `gen3_sweep_sim.py`; robot config:
+`KinovaGen3SweepSimConfig`.
+
 ## Prerequisites
 
 - [ROS 2 Jazzy](https://docs.ros.org/en/jazzy/Installation.html)
