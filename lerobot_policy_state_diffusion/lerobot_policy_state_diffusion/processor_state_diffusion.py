@@ -1,0 +1,3 @@
+from lerobot.policies.diffusion.processor_diffusion import make_diffusion_pre_post_processors
+
+make_state_diffusion_pre_post_processors = make_diffusion_pre_post_processors

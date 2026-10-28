@@ -70,6 +70,7 @@ class ROS2Interface:
         self.executor_thread: threading.Thread | None = None
         self.is_connected = False
         self._last_joint_state: dict[str, dict[str, float]] | None = None
+        self._last_joint_state_time: float | None = None  # time.monotonic() at receipt
 
     def connect(self) -> None:
         if not rclpy.ok():
@@ -303,29 +304,35 @@ class ROS2Interface:
         """Get the last received joint state."""
         return self._last_joint_state
 
+    @property
+    def joint_state_age(self) -> float | None:
+        """Seconds since the last complete joint state arrived (None if never)."""
+        if self._last_joint_state_time is None:
+            return None
+        return time.monotonic() - self._last_joint_state_time
+
     def _joint_state_callback(self, msg: "JointState") -> None:
-        self._last_joint_state = self._last_joint_state or {}
-        positions = {}
-        velocities = {}
-        name_to_index = {name: i for i, name in enumerate(msg.name)}
-        for joint_name in self.config.arm_joint_names:
-            idx = name_to_index.get(joint_name)
-            if idx is None:
-                raise ValueError(f"Joint '{joint_name}' not found in joint state.")
-            positions[joint_name] = msg.position[idx]
-            velocities[joint_name] = msg.velocity[idx]
-
+        # Never raise here: an exception kills the executor thread silently and
+        # freezes the observation. Incomplete messages are skipped, which the
+        # joint_state_age check in the backend turns into a loud failure.
+        names = list(self.config.arm_joint_names)
         if self.config.gripper_joint_name:
-            idx = name_to_index.get(self.config.gripper_joint_name)
-            if idx is None:
-                raise ValueError(
-                    f"Gripper joint '{self.config.gripper_joint_name}' not found in joint state."
-                )
-            positions[self.config.gripper_joint_name] = msg.position[idx]
-            velocities[self.config.gripper_joint_name] = msg.velocity[idx]
-
-        self._last_joint_state["position"] = positions
-        self._last_joint_state["velocity"] = velocities
+            names.append(self.config.gripper_joint_name)
+        name_to_index = {name: i for i, name in enumerate(msg.name)}
+        missing = [n for n in names if n not in name_to_index]
+        if missing:
+            self.robot_node.get_logger().warn(
+                f"Joint state missing {missing}; skipping message.", throttle_duration_sec=5.0
+            )
+            return
+        positions = {n: msg.position[name_to_index[n]] for n in names}
+        velocities = {
+            n: msg.velocity[name_to_index[n]] if len(msg.velocity) == len(msg.name) else 0.0
+            for n in names
+        }
+        # Swap in a new dict so readers never see positions and velocities from different messages.
+        self._last_joint_state = {"position": positions, "velocity": velocities}
+        self._last_joint_state_time = time.monotonic()
 
     def disconnect(self):
         if self.joint_state_sub:

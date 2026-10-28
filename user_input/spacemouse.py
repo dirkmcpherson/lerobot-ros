@@ -236,6 +236,14 @@ class SpacemouseUserInput(UserInput):
             self._gripper_is_open = True
             self._gripper_position = self._gripper_open_position
 
+    def set_gripper(self, is_open: bool) -> None:
+        """Set the gripper toggle state, e.g. to match the robot when taking over."""
+        with self._lock:
+            self._gripper_is_open = is_open
+            self._gripper_position = (
+                self._gripper_open_position if is_open else self._gripper_closed_position
+            )
+
     def get_action(self, current_positions: list[float]) -> list[float]:
         now = time.perf_counter()
         dt = now - self._last_time

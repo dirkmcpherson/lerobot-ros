@@ -1,6 +1,7 @@
 """BackendRobot — generic lerobot Robot that delegates to a RobotBackend."""
 
 import logging
+import numbers
 from typing import Any
 
 from lerobot.robots import Robot
@@ -35,6 +36,11 @@ class BackendRobot(Robot):
     def action_features(self) -> dict[str, type]:
         return self.backend.action_features
 
+    @property
+    def cameras(self) -> dict:
+        """Camera objects keyed by observation name (lerobot's record/rollout read this)."""
+        return getattr(self.backend, "_cameras", {})
+
     # --- Lifecycle ---
 
     @property
@@ -63,18 +69,24 @@ class BackendRobot(Robot):
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
-        # Optional safety clipping (shared for all backends)
+        # Optional safety clipping (shared for all backends). Only keys with a
+        # measured counterpart are capped: the gripper action ("gripper.pos") has
+        # no observation of that name, and capping it against 0 would pin it open.
         if self.config.max_relative_target is not None:
-            obs = self.backend.get_observation()
-            goal_present_pos = {}
-            for key, goal in action.items():
-                if isinstance(goal, (int, float)):
-                    present = obs.get(key, 0.0)
-                    goal_present_pos[key] = (goal, present)
+            joint_positions = getattr(self.backend, "joint_positions", None)
+            present = joint_positions() if joint_positions else self.backend.get_observation()
+            goal_present_pos = {
+                key: (float(goal), float(present[key]))
+                for key, goal in action.items()
+                if key in present and isinstance(goal, numbers.Real)
+            }
             if goal_present_pos:
-                action = ensure_safe_goal_position(
-                    goal_present_pos, self.config.max_relative_target
-                )
+                action = {
+                    **action,
+                    **ensure_safe_goal_position(
+                        goal_present_pos, float(self.config.max_relative_target)
+                    ),
+                }
 
         return self.backend.send_action(action)
 

@@ -11,7 +11,8 @@ class BackendRobotConfig(RobotConfig):
     """Base config for BackendRobot — extended by each backend's own config."""
 
     # Safety: clip relative action magnitude (shared across all backends).
-    max_relative_target: int | None = None
+    # Per-step cap on |goal - present| for each measured joint (radians for arms).
+    max_relative_target: float | None = None
 
     # Camera configs (backend-specific meaning: ROS2 uses ROS cameras,
     # ManiSkill embeds camera config in env_kwargs).

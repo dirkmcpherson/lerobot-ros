@@ -1,0 +1,13 @@
+[project]
+name = "lerobot-ros-backends"
+version = "0.1.0"
+description = "lerobot_backends (BackendRobot + ROS 2 / ManiSkill backends) and user_input teleop devices"
+requires-python = ">=3.10"
+dependencies = ["lerobot>=0.4.0,<0.7.0", "numpy"]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["lerobot_backends*", "user_input*"]

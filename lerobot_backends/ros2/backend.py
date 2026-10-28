@@ -21,6 +21,9 @@ class ROS2Backend:
         self._interface = ROS2Interface(config.ros2_interface, config.action_type, use_sim_time=config.use_sim_time)
         self._cameras = make_cameras_from_configs(config.cameras)
         self._connected = False
+        self._last_frames: dict[str, Any] = {}
+        self._last_gripper_goal: float | None = None
+        self._last_gripper_time = 0.0
 
     # --- Feature descriptors ---
 
@@ -94,20 +97,35 @@ class ROS2Backend:
 
     # --- Observation ---
 
-    def get_observation(self) -> dict[str, Any]:
-        obs: dict[str, Any] = {}
+    def joint_positions(self) -> dict[str, float]:
+        """Measured joint positions only (no cameras), keyed like observations."""
         joint_state = self._interface.joint_state
         if joint_state is None:
             raise ValueError("Joint state is not available yet.")
-        obs.update({f"{j}.pos": pos for j, pos in joint_state["position"].items()})
+        age = self._interface.joint_state_age
+        if self.config.max_state_age_sec is not None and age > self.config.max_state_age_sec:
+            raise RuntimeError(
+                f"Joint state is {age:.2f}s old (limit {self.config.max_state_age_sec}s): "
+                "driver down or /joint_states stalled."
+            )
+        return {f"{j}.pos": pos for j, pos in joint_state["position"].items()}
+
+    def get_observation(self) -> dict[str, Any]:
+        obs: dict[str, Any] = self.joint_positions()
 
         for cam_key, cam in self._cameras.items():
             start = time.perf_counter()
             try:
-                obs[cam_key] = cam.async_read(timeout_ms=300)
+                frame = cam.async_read(timeout_ms=300)
+                self._last_frames[cam_key] = frame
             except Exception as e:
-                logger.error(f"Failed to read camera {cam_key}: {e}")
-                obs[cam_key] = None
+                # A missing key would make dataset.add_frame reject the episode, so
+                # repeat the last good frame; fail only if there has never been one.
+                if cam_key not in self._last_frames:
+                    raise
+                logger.error(f"Failed to read camera {cam_key}, repeating last frame: {e}")
+                frame = self._last_frames[cam_key]
+            obs[cam_key] = frame
             dt_ms = (time.perf_counter() - start) * 1e3
             logger.debug(f"Read {cam_key}: {dt_ms:.1f}ms")
 
@@ -140,7 +158,16 @@ class ROS2Backend:
             )
 
         if "gripper.pos" in action:
-            self._interface.send_gripper_command(action["gripper.pos"], unnormalize=False)
+            goal = float(action["gripper.pos"])
+            now = time.monotonic()
+            if (
+                self._last_gripper_goal is None
+                or abs(goal - self._last_gripper_goal) > self.config.gripper_resend_tolerance
+                or now - self._last_gripper_time > self.config.gripper_resend_sec
+            ):
+                if self._interface.send_gripper_command(goal, unnormalize=False):
+                    self._last_gripper_goal = goal
+                    self._last_gripper_time = now
 
         return action
 

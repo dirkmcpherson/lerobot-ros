@@ -145,6 +145,13 @@ ros2 launch kortex_bringup kortex_sim_control.launch.py \
 
 Modified ros2_kortex files are backed up in `forked_cortex/`.
 
+## Gen3 Lite with lerobot 0.6.1: demos, Diffusion Policy, DAgger corrections
+
+Plugins `--robot.type=gen3_lite_ros`, `--teleop.type=spacemouse_joint` and
+`--policy.type=state_diffusion` for the stock lerobot CLIs, plus `gen3_lite_env.sh`.
+Setup, real-robot commands, safety behaviour and the Gazebo smoke test:
+[docs/GEN3_LITE_DAGGER.md](docs/GEN3_LITE_DAGGER.md).
+
 ## Gen3 sweep task (gen3-kinesthetic-teaching-ros2)
 
 Diffusion policy on the Gazebo sweep task of

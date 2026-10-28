@@ -102,6 +102,15 @@ class ROS2BackendConfig(BackendRobotConfig):
     # Simulation
     use_sim_time: bool = False
 
+    # Safety: get_observation() raises if the newest joint state is older than this
+    # (seconds, wall clock at receipt). None disables the check.
+    max_state_age_sec: float | None = 1.0
+
+    # The gripper goal is re-sent only when it changes by more than this, or after
+    # gripper_resend_sec, instead of every control tick.
+    gripper_resend_tolerance: float = 1e-3
+    gripper_resend_sec: float = 1.0
+
 
 # ---------------------------------------------------------------------------
 # Robot-specific presets
