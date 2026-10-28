@@ -36,8 +36,20 @@ class Gen3LiteRosConfig(KinovaGen3LiteConfig):
     self_collision_margin: float = 0.005
     # Box the tool frame must stay inside (base_link frame, metres). Default: about
     # +-15 cm in x/y around the cup-grasp pose taught on 2026-10-28 (tool at 0.282,
-    # 0.162, 0.065; right fingertip 1.8 cm above the plane), z from 3 to 45 cm, with x/z
-    # max raised to 0.45 so Kinova's home pose (tool at 0.439, 0.193, 0.443) is inside.
+    # 0.162, 0.065; right fingertip 1.8 cm above the plane), z from 3 to 50 cm, with x/z
+    # max raised so Kinova's home pose is inside (tool at 0.439, 0.193, 0.443 on the real
+    # arm; 0.442, 0.192, 0.453 in Gazebo, which sags differently).
     workspace_min: list[float] | None = field(default_factory=lambda: [0.13, 0.01, 0.03])
-    workspace_max: list[float] | None = field(default_factory=lambda: [0.45, 0.31, 0.45])
+    workspace_max: list[float] | None = field(default_factory=lambda: [0.45, 0.31, 0.50])
     urdf_path: str | None = None  # None: generated from kortex_description
+
+    # Homing: on connect, drive slowly to home_position (every step through the guard),
+    # gripper open. Default home is Kinova's own home pose, measured on the real arm after
+    # homing it from the web app on 2026-10-28 (tool frame at 0.439, 0.193, 0.443).
+    home_on_connect: bool = True
+    home_position: list[float] | None = field(
+        default_factory=lambda: [0.0, -0.282, 1.315, -0.003, -1.047, 0.0]
+    )
+    home_speed: float = 0.3  # rad/s, fastest joint
+    home_tolerance: float = 0.02  # rad, max joint error to count as home
+    home_timeout_sec: float = 30.0

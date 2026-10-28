@@ -112,9 +112,9 @@ per check.
 - **Table plane** at `plane_z=0` (bottom face of the arm's base; the real table is lower
   by the mount's height, which no URDF records), every moving link incl. fingers at least
   `plane_margin=0.015` m above it. The base link is exempt.
-- **Tool box** `workspace_min=[0.13, 0.01, 0.03]` .. `workspace_max=[0.45, 0.31, 0.45]`
+- **Tool box** `workspace_min=[0.13, 0.01, 0.03]` .. `workspace_max=[0.45, 0.31, 0.50]`
   (base frame): about +-15 cm around the cup-grasp pose (tool at 0.282, 0.162, 0.065),
-  widened in x/z so Kinova's home (tool at 0.439, 0.193, 0.443) is inside.
+  widened in x/z so Kinova's home (tool at 0.439, 0.193, 0.443; 0.453 in Gazebo) is inside.
 - **Self-collision** with the MoveIt SRDF's disabled pairs, `self_collision_margin=0.005`.
 - A violating command is replaced by the last accepted arm target (holding the measured
   pose instead would let gravity sag compound). Moves that reduce an existing violation
@@ -124,6 +124,15 @@ per check.
   a live SpaceMouse session pass; a 0.05 rad step toward the table from the grasp pose is
   blocked (fingertip would reach the plane); synthetic reach-down / fold / swing-out poses
   are all flagged.
+
+**Homing** (`home_on_connect=True`): on connect the robot drives to `home_position`
+(Kinova's home, measured on the real arm: `[0, -0.282, 1.315, -0.003, -1.047, 0]`, gripper
+horizontal pointing +x) at `home_speed=0.3` rad/s, every waypoint through the guard, gripper
+open. If the guard blocks the straight joint path it stops with an error instead of detouring.
+Gazebo (2026-10-28, sim spawned base 5 cm above ground): from the all-zero pose (tool at
+z 1.0, outside the box) homed in 4.4 s with nothing blocked; from the grasp pose, a joint
+path toward the table stopped at the step that would put the right fingertip 0.6 cm above
+the plane; a joint_1 swing stopped with the tool at x 0.139 against the 0.13 wall.
 
 ## Smoke test in Gazebo (2026-10-28, CPU only)
 
