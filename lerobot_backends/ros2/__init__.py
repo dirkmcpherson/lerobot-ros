@@ -5,6 +5,7 @@ from .config import (
     GripperActionType,
     KinovaGen3Config,
     KinovaGen3LiteConfig,
+    KinovaGen3SweepSimConfig,
     ROS2BackendConfig,
     ROS2InterfaceConfig,
     SO101ROSConfig,

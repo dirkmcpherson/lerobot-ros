@@ -203,3 +203,16 @@ class KinovaGen3LiteConfig(ROS2BackendConfig):
     home_position: list[float] | None = field(
         default_factory=lambda: [0.0, -0.52, 1.22, -1.22, -0.52, 0.0]
     )
+
+
+@dataclass
+class KinovaGen3SweepSimConfig(KinovaGen3Config):
+    """Gen3 7-DOF + broom in the gen3-kinesthetic-teaching-ros2 Gazebo sweep task.
+
+    Streams one-point trajectories at the policy rate (10 Hz), so each target is
+    reached in one control period. No home position: episode resets (cubes + a
+    random start pose) come from that repo's ``docker/sweep_demo.py --phase start``.
+    """
+
+    action_time_from_start_sec: float = 0.1
+    home_position: list[float] | None = None
