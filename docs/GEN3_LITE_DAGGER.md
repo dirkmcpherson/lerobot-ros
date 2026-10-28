@@ -103,6 +103,28 @@ Notes:
   which made `dataset.add_frame` reject the whole episode.
 - **Gripper:** the goal is re-sent only when it changes (or every 1 s), not every tick.
 
+## Workspace guard (`gen3_lite_ros`, on by default)
+
+`lerobot_backends/ros2/workspace_guard.py`, run inside `Gen3LiteRos.send_action` on the
+final (step-capped, joint-limit-clamped) target, so it covers SpaceMouse, policy and
+reset commands alike. Uses the URDF collision meshes (pinocchio + hpp-fcl), about 21 ms
+per check.
+- **Table plane** at `plane_z=0` (bottom face of the arm's base; the real table is lower
+  by the mount's height, which no URDF records), every moving link incl. fingers at least
+  `plane_margin=0.015` m above it. The base link is exempt.
+- **Tool box** `workspace_min=[0.13, 0.01, 0.03]` .. `workspace_max=[0.45, 0.31, 0.45]`
+  (base frame): about +-15 cm around the cup-grasp pose (tool at 0.282, 0.162, 0.065),
+  widened in x/z so Kinova's home (tool at 0.439, 0.193, 0.443) is inside.
+- **Self-collision** with the MoveIt SRDF's disabled pairs, `self_collision_margin=0.005`.
+- A violating command is replaced by the last accepted arm target (holding the measured
+  pose instead would let gravity sag compound). Moves that reduce an existing violation
+  are allowed, so the arm can always be driven out. `lerobot-record` still saves the
+  teleop's action, not the held one: derive actions from measured states where that matters.
+- Checked on the real arm (no commands sent): the taught grasp pose and all 448 frames of
+  a live SpaceMouse session pass; a 0.05 rad step toward the table from the grasp pose is
+  blocked (fingertip would reach the plane); synthetic reach-down / fold / swing-out poses
+  are all flagged.
+
 ## Smoke test in Gazebo (2026-10-28, CPU only)
 
 GPU driver not loaded at the time (kernel 7.0.0-38 had no NVIDIA module), so Gazebo ran

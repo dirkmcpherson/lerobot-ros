@@ -16,7 +16,6 @@ correct) is lerobot's keyboard handling, not the SpaceMouse.
 
 import logging
 import math
-import tempfile
 import threading
 import time
 from types import SimpleNamespace
@@ -27,20 +26,6 @@ from lerobot.teleoperators import Teleoperator
 from .config_spacemouse_joint import SpacemouseJointTeleopConfig
 
 logger = logging.getLogger(__name__)
-
-
-def _gen3_lite_urdf() -> str:
-    import xacro
-    from ament_index_python.packages import get_package_share_directory
-
-    xacro_path = (
-        f"{get_package_share_directory('kortex_description')}/robots/gen3_lite_gen3_lite_2f.xacro"
-    )
-    urdf = xacro.process_file(xacro_path).toxml()
-    with tempfile.NamedTemporaryFile("w", suffix="_gen3_lite.urdf", delete=False) as f:
-        f.write(urdf)
-    logger.info(f"Generated Gen3 Lite URDF from {xacro_path} -> {f.name}")
-    return f.name
 
 
 class SpacemouseJointTeleop(Teleoperator):
@@ -81,6 +66,7 @@ class SpacemouseJointTeleop(Teleoperator):
         from rclpy.parameter import Parameter
         from sensor_msgs.msg import JointState
 
+        from lerobot_backends.ros2.workspace_guard import gen3_lite_urdf
         from user_input.spacemouse import SpacemouseUserInput
 
         cfg = self.config
@@ -88,7 +74,7 @@ class SpacemouseJointTeleop(Teleoperator):
             joint_names=cfg.joint_names,
             min_joint_positions=cfg.min_joint_positions,
             max_joint_positions=cfg.max_joint_positions,
-            urdf_path=cfg.urdf_path or _gen3_lite_urdf(),
+            urdf_path=cfg.urdf_path or gen3_lite_urdf(),
             base_link=cfg.base_link,
             ee_link=cfg.ee_link,
             linear_scale=cfg.linear_scale,

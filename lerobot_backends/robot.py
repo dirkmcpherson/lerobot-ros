@@ -68,7 +68,9 @@ class BackendRobot(Robot):
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
+        return self.backend.send_action(self._apply_step_cap(action))
 
+    def _apply_step_cap(self, action: dict[str, Any]) -> dict[str, Any]:
         # Optional safety clipping (shared for all backends). Only keys with a
         # measured counterpart are capped: the gripper action ("gripper.pos") has
         # no observation of that name, and capping it against 0 would pin it open.
@@ -87,8 +89,7 @@ class BackendRobot(Robot):
                         goal_present_pos, float(self.config.max_relative_target)
                     ),
                 }
-
-        return self.backend.send_action(action)
+        return action
 
     # --- Calibration (not applicable at this level) ---
 
