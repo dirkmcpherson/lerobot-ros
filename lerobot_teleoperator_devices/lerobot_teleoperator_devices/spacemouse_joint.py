@@ -108,7 +108,11 @@ class SpacemouseJointTeleop(Teleoperator):
         while self._measured is None:
             if time.monotonic() > deadline:
                 self.disconnect()
-                raise TimeoutError(f"No complete message on {cfg.joint_states_topic} within 10 s")
+                raise TimeoutError(
+                    f"No complete message on {cfg.joint_states_topic} within 10 s: is the robot driver "
+                    "running (kortex_bringup gen3_lite.launch.py), in a shell with the same RMW / "
+                    "ROS_DOMAIN_ID (both sourced from gen3_lite_env.sh)?"
+                )
             time.sleep(0.05)
         logger.info(f"{self} connected ({cfg.device}).")
 
