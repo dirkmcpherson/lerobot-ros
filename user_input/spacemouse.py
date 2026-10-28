@@ -200,6 +200,9 @@ class SpacemouseUserInput(UserInput):
                             self._pending_buttons = [0, 0]
             except Exception:
                 break
+            # pyspacemouse opens the device non-blocking, so read() returns at once
+            # even with no new HID data; without a pause this loop pins a CPU core.
+            time.sleep(0.002)
 
     def disconnect(self) -> None:
         self._stop_reader = True
