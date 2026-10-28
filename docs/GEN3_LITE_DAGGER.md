@@ -111,8 +111,8 @@ reset commands alike. Uses the URDF collision meshes (pinocchio + hpp-fcl), abou
 per check.
 - **Table plane** at `plane_z=0` (bottom face of the arm's base; the real table is lower
   by the mount's height, which no URDF records), every moving link incl. fingers at least
-  `plane_margin=0.015` m above it. The base link is exempt.
-- **Tool box** `workspace_min=[0.13, 0.01, 0.03]` .. `workspace_max=[0.45, 0.31, 0.50]`
+  `plane_margin=0.005` m above it (was 0.015; lowered 1 cm so the gripper can reach lower). The base link is exempt.
+- **Tool box** `workspace_min=[0.13, 0.01, 0.02]` .. `workspace_max=[0.45, 0.31, 0.50]`
   (base frame): about +-15 cm around the cup-grasp pose (tool at 0.282, 0.162, 0.065),
   widened in x/z so Kinova's home (tool at 0.439, 0.193, 0.443; 0.453 in Gazebo) is inside.
 - **Self-collision** with the MoveIt SRDF's disabled pairs, `self_collision_margin=0.005`.
@@ -133,6 +133,11 @@ Gazebo (2026-10-28, sim spawned base 5 cm above ground): from the all-zero pose 
 z 1.0, outside the box) homed in 4.4 s with nothing blocked; from the grasp pose, a joint
 path toward the table stopped at the step that would put the right fingertip 0.6 cm above
 the plane; a joint_1 swing stopped with the tool at x 0.139 against the 0.13 wall.
+
+**Between episodes** use `python record_gen3_lite.py` (same arguments as `lerobot-record`):
+it wraps lerobot-record's reset period to start with `go_home()` (gripper open, slow guarded
+move to `--robot.home_position`), then leaves the rest of `--dataset.reset_time_s` to the
+SpaceMouse. Not yet run on the arm.
 
 ## Smoke test in Gazebo (2026-10-28, CPU only)
 

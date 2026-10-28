@@ -32,14 +32,14 @@ class Gen3LiteRosConfig(KinovaGen3LiteConfig):
     # at 0 is conservative. Every moving link must stay plane_margin above it.
     guard_enabled: bool = True
     plane_z: float = 0.0
-    plane_margin: float = 0.015
+    plane_margin: float = 0.005  # 1.5 cm until 2026-10-28; lowered 1 cm on request
     self_collision_margin: float = 0.005
     # Box the tool frame must stay inside (base_link frame, metres). Default: about
     # +-15 cm in x/y around the cup-grasp pose taught on 2026-10-28 (tool at 0.282,
-    # 0.162, 0.065; right fingertip 1.8 cm above the plane), z from 3 to 50 cm, with x/z
+    # 0.162, 0.065; right fingertip 1.8 cm above the plane), z from 2 to 50 cm, with x/z
     # max raised so Kinova's home pose is inside (tool at 0.439, 0.193, 0.443 on the real
     # arm; 0.442, 0.192, 0.453 in Gazebo, which sags differently).
-    workspace_min: list[float] | None = field(default_factory=lambda: [0.13, 0.01, 0.03])
+    workspace_min: list[float] | None = field(default_factory=lambda: [0.13, 0.01, 0.02])
     workspace_max: list[float] | None = field(default_factory=lambda: [0.45, 0.31, 0.50])
     urdf_path: str | None = None  # None: generated from kortex_description
 
