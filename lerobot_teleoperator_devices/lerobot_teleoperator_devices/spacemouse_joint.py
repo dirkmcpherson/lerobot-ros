@@ -42,6 +42,7 @@ class SpacemouseJointTeleop(Teleoperator):
         self._lock = threading.Lock()
         self._measured: dict[str, float] | None = None
         self._last_call: float | None = None
+        self._last_targets: list[float] | None = None
         self._t0 = time.monotonic()
 
     @property
@@ -138,6 +139,7 @@ class SpacemouseJointTeleop(Teleoperator):
         now = time.monotonic()
         if self._last_call is None or now - self._last_call > cfg.resync_after_sec:
             self._input.reset(q)
+            self._last_targets = None
             if cfg.gripper_joint_name:
                 self._input.set_gripper(measured[cfg.gripper_joint_name] < cfg.gripper_closed_threshold)
             logger.info("SpaceMouse re-synced to the measured robot pose.")
@@ -145,10 +147,15 @@ class SpacemouseJointTeleop(Teleoperator):
 
         if cfg.device == "scripted":
             self._input._latest_state = self._scripted_state()
-        targets = self._input.get_action(q)
+        ref = q
+        if cfg.integrate_from_target and self._last_targets is not None:
+            lead = cfg.max_joint_step if cfg.max_joint_step is not None else 0.1
+            ref = [min(max(t, m - lead), m + lead) for t, m in zip(self._last_targets, q, strict=True)]
+        targets = self._input.get_action(ref)
         if cfg.max_joint_step is not None:
             step = cfg.max_joint_step
             targets = [min(max(t, m - step), m + step) for t, m in zip(targets, q, strict=True)]
+        self._last_targets = list(targets)
 
         action = {f"{j}.pos": float(v) for j, v in zip(cfg.joint_names, targets, strict=True)}
         if cfg.gripper_joint_name:

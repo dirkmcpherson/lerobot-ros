@@ -106,6 +106,18 @@ class ROS2BackendConfig(BackendRobotConfig):
     # (seconds, wall clock at receipt). None disables the check.
     max_state_age_sec: float | None = 1.0
 
+    # Streaming joint commands: give each point an end velocity ((target - previous
+    # target) / interval) and a time_from_start equal to the measured command interval,
+    # so consecutive goals join into one smooth motion. Off: each point ends at rest
+    # after action_time_from_start_sec, which stutters at the command rate.
+    # Needs joint_trajectory_controller with allow_nonzero_velocity_at_trajectory_end
+    # (and, to matter, interpolate_from_desired_state): the stock Kortex config rejects
+    # every such goal and the arm does not move. Launch the driver with
+    # controllers_file:=<repo>/config/gen3_lite_ros2_controllers_streaming.yaml first.
+    stream_velocities: bool = False
+    # Commands further apart than this (s) start from rest (first command, pauses).
+    stream_max_interval_sec: float = 0.3
+
     # The gripper goal is re-sent only when it changes by more than this, or after
     # gripper_resend_sec, instead of every control tick.
     gripper_resend_tolerance: float = 1e-3
@@ -236,4 +248,5 @@ class KinovaGen3SweepSimConfig(KinovaGen3Config):
             KinovaGen3Config().ros2_interface, use_trajectory_action=False
         )
     )
+    stream_velocities: bool = False  # keep the timing the policy was trained on
     home_position: list[float] | None = None

@@ -23,6 +23,8 @@ class ROS2Backend:
         self._connected = False
         self._last_frames: dict[str, Any] = {}
         self._last_gripper_goal: float | None = None
+        self._last_arm_target: list[float] | None = None
+        self._last_arm_time: float | None = None
         self._last_gripper_time = 0.0
 
     # --- Feature descriptors ---
@@ -150,12 +152,23 @@ class ROS2Backend:
             self._interface.servo(linear=linear, angular=angular)
         elif self.config.action_type in (ActionType.JOINT_POSITION, ActionType.JOINT_TRAJECTORY):
             joint_positions = [
-                action[f"{j}.pos"] for j in iface_cfg.arm_joint_names
+                float(action[f"{j}.pos"]) for j in iface_cfg.arm_joint_names
             ]
+            duration, velocities = self.config.action_time_from_start_sec, None
+            now = time.monotonic()
+            if self.config.stream_velocities and self.config.action_type == ActionType.JOINT_TRAJECTORY:
+                interval = None if self._last_arm_time is None else now - self._last_arm_time
+                if interval is not None and 0.0 < interval <= self.config.stream_max_interval_sec:
+                    duration = interval
+                    velocities = [
+                        (q - p) / interval for q, p in zip(joint_positions, self._last_arm_target, strict=True)
+                    ]
+                else:
+                    velocities = [0.0] * len(joint_positions)
             self._interface.send_joint_position_command(
-                joint_positions,
-                time_from_start_sec=self.config.action_time_from_start_sec,
+                joint_positions, time_from_start_sec=duration, velocities=velocities
             )
+            self._last_arm_target, self._last_arm_time = joint_positions, now
 
         if "gripper.pos" in action:
             goal = float(action["gripper.pos"])

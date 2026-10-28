@@ -1,0 +1,65 @@
+# Copy of kortex_description arms/gen3_lite/6dof/config/ros2_controllers.yaml with two
+# joint_trajectory_controller settings added for streamed teleop / policy commands.
+# Use: ros2 launch kortex_bringup gen3_lite.launch.py ... controllers_file:=<abs path to this file>
+controller_manager:
+  ros__parameters:
+    update_rate: 1000  # Hz
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    joint_trajectory_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    twist_controller:
+      type: picknik_twist_controller/PicknikTwistController
+
+    fault_controller:
+      type: picknik_reset_fault_controller/PicknikResetFaultController
+
+    gen3_lite_2f_gripper_controller:
+      type: position_controllers/GripperActionController
+
+joint_trajectory_controller:
+  ros__parameters:
+    # lerobot-ros streaming (one goal per control tick): continue each new goal from the
+    # previous goal's desired state instead of the measured state (this arm reports no
+    # joint velocity, so a measured start always begins at rest -> stop-go at the
+    # command rate), and accept goals that end moving.
+    interpolate_from_desired_state: true
+    allow_nonzero_velocity_at_trajectory_end: true
+    joints:
+      - joint_1
+      - joint_2
+      - joint_3
+      - joint_4
+      - joint_5
+      - joint_6
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    state_publish_rate: 100.0
+    action_monitor_rate: 20.0
+    allow_partial_joints_goal: false
+    constraints:
+      stopped_velocity_tolerance: 0.0
+      goal_time: 0.0
+
+twist_controller:
+  ros__parameters:
+    joint: tcp
+    interface_names:
+      - twist.linear.x
+      - twist.linear.y
+      - twist.linear.z
+      - twist.angular.x
+      - twist.angular.y
+      - twist.angular.z
+
+gen3_lite_2f_gripper_controller:
+  ros__parameters:
+    default: true
+    joint: right_finger_bottom_joint
+    allow_stalling: true

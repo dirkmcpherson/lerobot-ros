@@ -47,6 +47,11 @@ class SpacemouseJointTeleopConfig(TeleoperatorConfig):
     # max_relative_target so recorded actions are exactly what the robot was sent.
     max_joint_step: float | None = 0.1
 
+    # Integrate each IK step from the previous target (kept within max_joint_step of the
+    # measured pose) rather than from the measured pose, which lags the command and makes
+    # every step restart from behind. False: integrate from the measured pose.
+    integrate_from_target: bool = True
+
     # A gap this long between get_action() calls means control was handed over
     # (e.g. a DAgger correction starting): re-sync targets and gripper to the robot.
     resync_after_sec: float = 0.5

@@ -173,7 +173,11 @@ class ROS2Interface:
         self.is_connected = True
 
     def send_joint_position_command(
-        self, joint_positions: list[float], unnormalize: bool = True, time_from_start_sec: float = 1.0
+        self,
+        joint_positions: list[float],
+        unnormalize: bool = True,
+        time_from_start_sec: float = 1.0,
+        velocities: list[float] | None = None,
     ) -> None:
         """
         Send a command to the robot's joints.
@@ -207,6 +211,10 @@ class ROS2Interface:
         if self.action_type == ActionType.JOINT_TRAJECTORY:
             point = JointTrajectoryPoint()
             point.positions = joint_positions
+            if velocities is not None:
+                # End velocity of this point: lets the controller carry the motion into the
+                # next streamed goal instead of decelerating to rest at every point.
+                point.velocities = [float(v) for v in velocities]
             sec = int(time_from_start_sec)
             nanosec = int((time_from_start_sec - sec) * 1e9)
             point.time_from_start = Duration(sec=sec, nanosec=nanosec)
