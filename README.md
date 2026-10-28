@@ -10,6 +10,17 @@ Forked from [ycheng517/lerobot-ros](https://github.com/ycheng517/lerobot-ros) an
 > **[docs/LYRICAL_KINOVA.md](docs/LYRICAL_KINOVA.md)** for the Lyrical/Python-3.14
 > environment, the required patches, real-hardware bring-up, and known limits
 > (MoveIt is unavailable on Lyrical).
+>
+> **Jazzy / Ubuntu 24.04** (branch `ros2_ubuntu24_04`): the Lyrical branch's backend
+> changes all apply except the gripper action. Jazzy's ros2_kortex still runs
+> `position_controllers/GripperActionController` (`control_msgs/GripperCommand`), so
+> `KinovaGen3LiteConfig` picks `GripperActionType.ACTION` when `ROS_DISTRO=jazzy` and
+> `PARALLEL_ACTION` otherwise. Use the Python 3.12 env below; `lerobot_py314_compat` is a
+> no-op there. Verified against `gen3_lite.launch.py use_fake_hardware:=true` (from
+> `~/workspace/ros2_kortex_ws`) with `real_kinova_backend_test.py`: gripper 0.5 / 0.1 and
+> joint_6 +0.1 rad and back, all exact, through the FollowJointTrajectory and
+> GripperCommand actions. `KinovaGen3SweepSimConfig` keeps the JTC topic
+> (`use_trajectory_action=False`), the path its policy was trained and measured on.
 
 ## Architecture
 

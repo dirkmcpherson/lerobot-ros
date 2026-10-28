@@ -5,7 +5,8 @@ them with ``home_position`` / ``home_settle_sec`` so the backend can handle
 episode resets automatically.
 """
 
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass, field, replace
 from enum import Enum
 
 from lerobot.cameras import CameraConfig
@@ -196,7 +197,12 @@ class KinovaGen3LiteConfig(ROS2BackendConfig):
             # parallel_gripper_action_controller/GripperActionController, whose
             # action is control_msgs/ParallelGripperCommand (goal is a JointState),
             # not the classic GripperCommand. (position_controllers was removed.)
-            gripper_action_type=GripperActionType.PARALLEL_ACTION,
+            # Jazzy's ros2_kortex still uses position_controllers/GripperActionController.
+            gripper_action_type=(
+                GripperActionType.ACTION
+                if os.environ.get("ROS_DISTRO") == "jazzy"
+                else GripperActionType.PARALLEL_ACTION
+            ),
         ),
     )
 
@@ -212,7 +218,13 @@ class KinovaGen3SweepSimConfig(KinovaGen3Config):
     Streams one-point trajectories at the policy rate (10 Hz), so each target is
     reached in one control period. No home position: episode resets (cubes + a
     random start pose) come from that repo's ``docker/sweep_demo.py --phase start``.
+    Joint commands go over the JTC topic, the path the trained policy was measured on.
     """
 
     action_time_from_start_sec: float = 0.1
+    ros2_interface: ROS2InterfaceConfig = field(
+        default_factory=lambda: replace(
+            KinovaGen3Config().ros2_interface, use_trajectory_action=False
+        )
+    )
     home_position: list[float] | None = None
