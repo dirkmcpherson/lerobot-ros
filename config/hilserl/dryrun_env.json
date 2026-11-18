@@ -1,0 +1,125 @@
+{
+  "env": {
+    "name": "real_robot",
+    "task": "gen3_lite_reach",
+    "fps": 10,
+    "robot": {
+      "type": "gen3_lite_hil_fake",
+      "urdf_path": "tests/fixtures/gen3_lite.urdf",
+      "use_gripper": false,
+      "ee_bounds_min": [
+        0.15,
+        0.03,
+        0.04
+      ],
+      "ee_bounds_max": [
+        0.43,
+        0.29,
+        0.4
+      ],
+      "fake_target": [
+        0.33,
+        0.12,
+        0.25
+      ],
+      "home_speed": 3.0,
+      "cameras": {
+        "front": {
+          "type": "opencv",
+          "index_or_path": 0,
+          "fps": 10,
+          "width": 64,
+          "height": 64
+        }
+      },
+      "reset_joint_positions": [
+        -0.255,
+        -0.607,
+        2.202,
+        0.249,
+        -1.469,
+        -1.227
+      ]
+    },
+    "teleop": {
+      "type": "scripted_ee",
+      "use_gripper": false,
+      "takeovers": [
+        [
+          8,
+          20
+        ]
+      ],
+      "target": [
+        0.33,
+        0.12,
+        0.25
+      ],
+      "success_radius_m": 0.015,
+      "episode_steps": 29,
+      "always_intervene": true
+    },
+    "processor": {
+      "control_mode": "gamepad",
+      "observation": {
+        "display_cameras": false
+      },
+      "image_preprocessing": {
+        "crop_params_dict": null,
+        "resize_size": [
+          64,
+          64
+        ]
+      },
+      "gripper": {
+        "use_gripper": false,
+        "gripper_penalty": 0.0
+      },
+      "reset": {
+        "reset_time_s": 0.0,
+        "control_time_s": 3.0,
+        "terminate_on_success": true,
+        "fixed_reset_joint_positions": null
+      },
+      "inverse_kinematics": null,
+      "reward_classifier": null,
+      "max_gripper_pos": null
+    },
+    "features": {
+      "observation.images.front": {
+        "type": "VISUAL",
+        "shape": [
+          3,
+          64,
+          64
+        ]
+      },
+      "observation.state": {
+        "type": "STATE",
+        "shape": [
+          10
+        ]
+      },
+      "action": {
+        "type": "ACTION",
+        "shape": [
+          3
+        ]
+      }
+    },
+    "features_map": {
+      "observation.images.front": "observation.images.front",
+      "observation.state": "observation.state",
+      "action": "action"
+    }
+  },
+  "dataset": {
+    "repo_id": "local/dryrun_reach_demos",
+    "root": "data/dryrun_reach_demos",
+    "task": "reach the target",
+    "num_episodes_to_record": 5,
+    "push_to_hub": false
+  },
+  "mode": "record",
+  "device": "cpu"
+}

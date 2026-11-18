@@ -4,3 +4,5 @@ from .gamepad_6dof import Gamepad6DOFTeleop
 from .keyboard_joint import KeyboardJointTeleop
 from .config_spacemouse_joint import SpacemouseJointTeleopConfig
 from .spacemouse_joint import SpacemouseJointTeleop
+from .config_scripted_ee import ScriptedEeTeleopConfig
+from .scripted_ee import ScriptedEeTeleop

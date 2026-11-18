@@ -21,10 +21,11 @@ class BackendRobot(Robot):
     config_class = BackendRobotConfig
     name = "backend"
 
-    def __init__(self, config: BackendRobotConfig):
+    def __init__(self, config: BackendRobotConfig, backend: RobotBackend | None = None):
         super().__init__(config)
         self.config = config
-        self.backend: RobotBackend = make_backend(config)
+        # ``backend`` lets tests and dry runs supply a fake instead of ROS / a simulator.
+        self.backend: RobotBackend = backend if backend is not None else make_backend(config)
 
     # --- Feature descriptors (forwarded from backend) ---
 

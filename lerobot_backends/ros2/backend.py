@@ -22,6 +22,7 @@ class ROS2Backend:
         self._cameras = make_cameras_from_configs(config.cameras)
         self._connected = False
         self._last_frames: dict[str, Any] = {}
+        self._last_frame_times: dict[str, float] = {}  # time.monotonic() of each camera's last good read
         self._last_gripper_goal: float | None = None
         self._last_arm_target: list[float] | None = None
         self._last_arm_time: float | None = None
@@ -112,6 +113,23 @@ class ROS2Backend:
             )
         return {f"{j}.pos": pos for j, pos in joint_state["position"].items()}
 
+    def joint_velocities(self) -> dict[str, float]:
+        """Measured joint velocities from the same message as joint_positions(), keyed ``<joint>.vel``."""
+        joint_state = self._interface.joint_state
+        if joint_state is None:
+            raise ValueError("Joint state is not available yet.")
+        return {f"{j}.vel": vel for j, vel in joint_state["velocity"].items()}
+
+    @property
+    def joint_state_age(self) -> float | None:
+        """Seconds since the newest complete /joint_states message (None before the first)."""
+        return self._interface.joint_state_age
+
+    def camera_frame_ages(self) -> dict[str, float]:
+        """Seconds since each camera's last successful read (missing key: never read)."""
+        now = time.monotonic()
+        return {k: now - t for k, t in self._last_frame_times.items()}
+
     def get_observation(self) -> dict[str, Any]:
         obs: dict[str, Any] = self.joint_positions()
 
@@ -120,6 +138,7 @@ class ROS2Backend:
             try:
                 frame = cam.async_read(timeout_ms=300)
                 self._last_frames[cam_key] = frame
+                self._last_frame_times[cam_key] = time.monotonic()
             except Exception as e:
                 # A missing key would make dataset.add_frame reject the episode, so
                 # repeat the last good frame; fail only if there has never been one.

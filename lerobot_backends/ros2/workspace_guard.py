@@ -57,9 +57,9 @@ class WorkspaceGuard:
         box_max: list[float] | None = None,
         box_frame: str = "tool_frame",
         srdf_path: str | None = None,
+        package_dirs: list[str] | None = None,
     ):
         import pinocchio as pin
-        from ament_index_python.packages import get_package_share_directory
 
         from user_input.collision import CollisionChecker
 
@@ -74,12 +74,16 @@ class WorkspaceGuard:
         self.plane_margin = plane_margin
         self.self_margin = self_margin
 
-        share_parent = str(
-            __import__("pathlib").Path(get_package_share_directory("kortex_description")).parent
-        )
+        if package_dirs is None:
+            # Directory that contains kortex_description/, to resolve the URDF's package:// meshes.
+            from ament_index_python.packages import get_package_share_directory
+
+            package_dirs = [
+                str(__import__("pathlib").Path(get_package_share_directory("kortex_description")).parent)
+            ]
         checker = CollisionChecker(
             urdf_path=urdf_path,
-            package_dirs=[share_parent],
+            package_dirs=package_dirs,
             srdf_path=srdf_path,
             ground_plane_z=plane_z,
         )

@@ -17,8 +17,8 @@ class Gen3LiteRos(BackendRobot):
     config_class = Gen3LiteRosConfig
     name = "gen3_lite_ros"
 
-    def __init__(self, config: Gen3LiteRosConfig):
-        super().__init__(config)
+    def __init__(self, config: Gen3LiteRosConfig, backend=None):
+        super().__init__(config, backend=backend)
         self.config = config
         self._guard = None
         self._held_arm: list[float] | None = None  # last arm target the guard accepted
@@ -45,6 +45,7 @@ class Gen3LiteRos(BackendRobot):
                 box_min=cfg.workspace_min,
                 box_max=cfg.workspace_max,
                 srdf_path=gen3_lite_srdf(),
+                package_dirs=cfg.mesh_package_dirs,
             )
         super().connect(calibrate)
         if self._guard is not None:
@@ -75,8 +76,8 @@ class Gen3LiteRos(BackendRobot):
         deadline = time.monotonic() + cfg.home_timeout_sec
         for k in range(1, n + 1):
             wp = start + (home - start) * k / n
-            self.send_action({**dict(zip(keys, wp.tolist(), strict=True)),
-                              "gripper.pos": iface.gripper_open_position})
+            self.send_joint_action({**dict(zip(keys, wp.tolist(), strict=True)),
+                                    "gripper.pos": iface.gripper_open_position})
             time.sleep(dt)
             if self.blocked_commands > blocked_before:
                 raise RuntimeError(
@@ -91,8 +92,8 @@ class Gen3LiteRos(BackendRobot):
                 return
             if time.monotonic() > deadline:
                 raise RuntimeError(f"Homing timed out {err:.3f} rad from home.")
-            self.send_action({**dict(zip(keys, home.tolist(), strict=True)),
-                              "gripper.pos": iface.gripper_open_position})
+            self.send_joint_action({**dict(zip(keys, home.tolist(), strict=True)),
+                                    "gripper.pos": iface.gripper_open_position})
             time.sleep(dt)
 
     def _measured(self) -> tuple[list[float], float]:
@@ -102,6 +103,11 @@ class Gen3LiteRos(BackendRobot):
         return [pos[f"{j}.pos"] for j in iface.arm_joint_names], grip
 
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        return self.send_joint_action(action)
+
+    def send_joint_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        """Absolute joint targets through the step cap and the workspace guard. Subclasses
+        with another action space (Gen3LiteHil) still home and hold through this."""
         action = self._apply_step_cap(action)
         if self._guard is not None:
             action = self._guard_action(action)

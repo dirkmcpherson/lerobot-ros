@@ -42,6 +42,9 @@ class Gen3LiteRosConfig(KinovaGen3LiteConfig):
     workspace_min: list[float] | None = field(default_factory=lambda: [0.13, 0.01, 0.02])
     workspace_max: list[float] | None = field(default_factory=lambda: [0.45, 0.31, 0.50])
     urdf_path: str | None = None  # None: generated from kortex_description
+    # Directories containing kortex_description/ (for the URDF's package:// meshes).
+    # None: found through the sourced ROS workspace.
+    mesh_package_dirs: list[str] | None = None
 
     # Homing: on connect, drive slowly to home_position (every step through the guard),
     # gripper open. Default home is Kinova's own home pose, measured on the real arm after

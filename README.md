@@ -145,6 +145,21 @@ ros2 launch kortex_bringup kortex_sim_control.launch.py \
 
 Modified ros2_kortex files are backed up in `forked_cortex/`.
 
+## Gen3 Lite HIL-SERL (lerobot 0.6.1)
+
+Stock HIL-SERL (SAC, demos + interventions) on the Gen3 Lite: `--robot.type=gen3_lite_hil`
+(end-effector delta actions with limits, watchdog and stale-observation stop enforced in
+the robot class), lerobot's `gamepad` teleop for takeovers, and `hilserl_gen3_lite/`
+entry points that wrap lerobot's unmodified learner and actor and log success rate,
+intervention rate and episode length against environment steps. Recon, run book and
+what has and has not been verified: [docs/GEN3_LITE_HILSERL.md](docs/GEN3_LITE_HILSERL.md).
+Testing it in Gazebo on a GPU machine: [docs/GEN3_LITE_HILSERL_HANDOFF.md](docs/GEN3_LITE_HILSERL_HANDOFF.md).
+
+```bash
+python -m pytest                                                       # no hardware
+python -m hilserl_gen3_lite.smoke_test --robot.type=gen3_lite_hil --run.confirm_motion=true   # moves the arm
+```
+
 ## Gen3 Lite with lerobot 0.6.1: demos, Diffusion Policy, DAgger corrections
 
 Plugins `--robot.type=gen3_lite_ros`, `--teleop.type=spacemouse_joint` and
