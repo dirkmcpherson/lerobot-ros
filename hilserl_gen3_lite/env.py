@@ -29,11 +29,12 @@ from lerobot.processor import (
     AddTeleopEventsAsInfoStep,
     DataProcessorPipeline,
     DeviceProcessorStep,
-    GripperPenaltyProcessorStep,
     ImageCropResizeProcessorStep,
     InterventionActionProcessorStep,
+    ProcessorStep,
     RewardClassifierProcessorStep,
     TimeLimitProcessorStep,
+    TransitionKey,
     VanillaObservationProcessorStep,
     identity_transition,
 )
@@ -43,6 +44,42 @@ from lerobot.utils.constants import OBS_IMAGES, OBS_STATE
 from lerobot.utils.robot_utils import precise_sleep
 
 logger = logging.getLogger(__name__)
+
+GRIPPER_TOGGLED = "gripper_toggled"
+DISCRETE_PENALTY = "discrete_penalty"
+
+
+class GripperTogglePenaltyStep(ProcessorStep):
+    """Adds ``discrete_penalty`` to the complementary data: ``penalty`` (a negative number)
+    on a step whose gripper command changed what the gripper is asked to do, else 0.
+
+    Stands in for lerobot's ``GripperPenaltyProcessorStep``, which reads the last action
+    dimension as a gripper joint target (its SO-100 pipeline converts to joint targets
+    first). Here that dimension is the discrete command itself (0 close, 1 stay, 2 open):
+    fed to the upstream step it would read "stay" as a close command and penalise every
+    step taken with the gripper open. The environment reports the toggle; a button held
+    down for a second while the fingers travel is one toggle, not ten.
+    """
+
+    def __init__(self, penalty: float = -0.02):
+        self.penalty = float(penalty)
+
+    def __call__(self, transition):
+        out = transition.copy()
+        info = out.get(TransitionKey.INFO) or {}
+        data = dict(out.get(TransitionKey.COMPLEMENTARY_DATA) or {})
+        data[DISCRETE_PENALTY] = self.penalty if info.get(GRIPPER_TOGGLED, False) else 0.0
+        out[TransitionKey.COMPLEMENTARY_DATA] = data
+        return out
+
+    def reset(self) -> None:
+        pass
+
+    def get_config(self) -> dict[str, Any]:
+        return {"penalty": self.penalty}
+
+    def transform_features(self, features):
+        return features
 
 
 class Gen3LiteHilEnv(gym.Env):
@@ -66,9 +103,12 @@ class Gen3LiteHilEnv(gym.Env):
         self.on_reset = on_reset
         self.current_step = 0
         self._raw_joint_positions: dict[str, float] | None = None
+        self._gripper_asked_closed = False
 
         if not self.robot.is_connected:
             self.robot.connect()
+        if reset_joint_positions is not None:  # roll, pitch, yaw frozen at the start pose's
+            self.robot.freeze_orientation_at(list(reset_joint_positions))
         self._state_keys = list(self.robot.state_keys)
         self._image_keys = list(self.robot.config.cameras.keys())
         self._setup_spaces()
@@ -106,15 +146,25 @@ class Gen3LiteHilEnv(gym.Env):
             self.robot.go_home(list(self.reset_joint_positions))
         precise_sleep(max(self.reset_time_s - (time.perf_counter() - start), 0.0))
         self.current_step = 0
-        return self._get_observation(), {TeleopEvents.IS_INTERVENTION: False}
+        obs = self._get_observation()
+        if self.use_gripper:  # homing opens the gripper; without homing, go by what is measured
+            iface = self.robot.config.ros2_interface
+            half = 0.5 * (iface.gripper_open_position + iface.gripper_close_position)
+            self._gripper_asked_closed = obs.get("gripper.pos", iface.gripper_open_position) > half
+        return obs, {TeleopEvents.IS_INTERVENTION: False}
 
     def step(self, action):
         if isinstance(action, torch.Tensor):
             action = action.detach().cpu().numpy()
         a = np.asarray(action, dtype=float).reshape(-1)
         command = {"delta_x": a[0], "delta_y": a[1], "delta_z": a[2]}
+        toggled = False
         if self.use_gripper and a.size > 3:
             command["gripper"] = a[3]
+            g = int(round(float(a[3]))) if np.isfinite(a[3]) else 1
+            if (g <= 0 and not self._gripper_asked_closed) or (g >= 2 and self._gripper_asked_closed):
+                toggled = True
+                self._gripper_asked_closed = g <= 0
         try:
             self.robot.send_action(command)
             obs = self._get_observation()
@@ -128,7 +178,7 @@ class Gen3LiteHilEnv(gym.Env):
         if self.display_cameras:
             self.render()
         self.current_step += 1
-        return obs, 0.0, False, False, {TeleopEvents.IS_INTERVENTION: False}
+        return obs, 0.0, False, False, {TeleopEvents.IS_INTERVENTION: False, GRIPPER_TOGGLED: toggled}
 
     def render(self) -> None:
         import cv2
@@ -198,10 +248,11 @@ def make_processors(env: gym.Env, teleop_device, cfg: HILSerlRobotEnvConfig, dev
         )
     if proc.reset is not None:
         env_steps.append(TimeLimitProcessorStep(max_episode_steps=int(proc.reset.control_time_s * cfg.fps)))
-    if use_gripper and proc.max_gripper_pos is not None:
-        env_steps.append(
-            GripperPenaltyProcessorStep(penalty=proc.gripper.gripper_penalty, max_gripper_pos=proc.max_gripper_pos)
-        )
+    if use_gripper:
+        penalty = proc.gripper.gripper_penalty
+        if penalty > 0:
+            raise ValueError(f"env.processor.gripper.gripper_penalty must be zero or negative, got {penalty}")
+        env_steps.append(GripperTogglePenaltyStep(penalty=penalty))
     if proc.reward_classifier is not None and proc.reward_classifier.pretrained_path is not None:
         env_steps.append(
             RewardClassifierProcessorStep(

@@ -193,7 +193,15 @@ def test_executed_motion_matches_who_was_driving(recorded):
 def test_sampled_batch_keeps_provenance_aligned_across_both_buffers(recorded):
     from lerobot.datasets import LeRobotDataset
 
-    dataset = LeRobotDataset("local/takeover_test_demos", root=recorded["demo_root"])
+    from hilserl_gen3_lite import compat
+
+    compat.apply()
+    # Loaded as the learner loads it: lerobot's make_dataset passes return_uint8=True, so
+    # images arrive as uint8 in [0, 255]. (Loading with the default float images, as this
+    # test first did, hid that the offline buffer then held images 255 times brighter
+    # than the online one; compat.apply() rescales them.)
+    dataset = LeRobotDataset("local/takeover_test_demos", root=recorded["demo_root"], return_uint8=True)
+    assert dataset[0]["observation.images.front"].dtype == torch.uint8
     assert {f"complementary_info.{k}" for k in COMPLEMENTARY_KEYS} <= set(dataset.features)
 
     offline = ReplayBuffer.from_lerobot_dataset(
@@ -239,6 +247,11 @@ def test_sampled_batch_keeps_provenance_aligned_across_both_buffers(recorded):
         assert (action[human | demo][:, 2] > 0.9).all()
         # online half first, then the offline half (demos and interventions only)
         assert not policy[n // 2 :].any()
+        # images from both buffers are on the same [0, 1] scale, demos included
+        images = batch["state"]["observation.images.front"]
+        assert images.min() >= 0.0 and images.max() <= 1.0
+        if demo.any() and policy.any():
+            assert abs(float(images[demo].mean()) - float(images[policy].mean())) < 0.2
 
         fractions = batch_source_fractions(batch)
         assert fractions["batch_frac_demo"] + fractions["batch_frac_intervention"] + fractions[

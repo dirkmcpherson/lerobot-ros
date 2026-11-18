@@ -12,6 +12,19 @@ from lerobot.robots import RobotConfig
 from lerobot_backends.ros2.config import KinovaGen3LiteConfig
 
 
+@dataclass
+class NoGoBox:
+    """An axis-aligned box in the base_link frame (metres) that no moving link may enter."""
+
+    name: str = "box"
+    min: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    max: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+
+    def __post_init__(self):
+        if len(self.min) != 3 or len(self.max) != 3 or not all(a < b for a, b in zip(self.min, self.max, strict=True)):
+            raise ValueError(f"no-go box '{self.name}' needs 3-D min < max, got {self.min} .. {self.max}")
+
+
 @RobotConfig.register_subclass("gen3_lite_ros")
 @dataclass
 class Gen3LiteRosConfig(KinovaGen3LiteConfig):
@@ -41,6 +54,13 @@ class Gen3LiteRosConfig(KinovaGen3LiteConfig):
     # arm; 0.442, 0.192, 0.453 in Gazebo, which sags differently).
     workspace_min: list[float] | None = field(default_factory=lambda: [0.13, 0.01, 0.02])
     workspace_max: list[float] | None = field(default_factory=lambda: [0.45, 0.31, 0.50])
+    # No-go geometry: boxes around anything rigid within reach that the arm must not touch
+    # (the camera and its mount, fixtures, the edge of a shelf). Every moving link, fingers
+    # included, stays no_go_margin away from each box; a command that would bring one
+    # closer is replaced by a hold, like the other guard checks. The table is plane_z; the
+    # arm's own links are covered by the self-collision check. Requires guard_enabled.
+    no_go_boxes: list[NoGoBox] = field(default_factory=list)
+    no_go_margin: float = 0.02
     urdf_path: str | None = None  # None: generated from kortex_description
     # Directories containing kortex_description/ (for the URDF's package:// meshes).
     # None: found through the sourced ROS workspace.

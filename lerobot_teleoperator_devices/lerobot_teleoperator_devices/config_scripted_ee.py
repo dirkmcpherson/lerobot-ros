@@ -10,8 +10,9 @@ class ScriptedEeTeleopConfig(TeleoperatorConfig):
     ``gen3_lite_hil_fake`` and for unattended runs of ``gen3_lite_hil`` in Gazebo. Same
     actions and events as lerobot's ``gamepad`` teleop.
 
-    It drives the tool towards ``target`` and reports success (the operator's success
-    key) once the tool is within ``success_radius_m`` of it.
+    Without a gripper it drives the tool towards ``target`` and reports success (the
+    operator's success key) once the tool is within ``success_radius_m`` of it. With
+    ``use_gripper`` it does a pick and place between two points (see ``place_target``).
     """
 
     use_gripper: bool = False
@@ -23,6 +24,13 @@ class ScriptedEeTeleopConfig(TeleoperatorConfig):
     # True: hold the takeover trigger for whole episodes (recording demos).
     always_intervene: bool = False
     target: list[float] = field(default_factory=lambda: [0.33, 0.12, 0.25])
+    # With use_gripper, a pick and place without an object: go to ``target``, close the
+    # gripper, carry to ``place_target``, open. Success needs the whole sequence: the
+    # gripper closed while at the pick point, later open at the place point.
+    place_target: list[float] = field(default_factory=lambda: [0.27, 0.20, 0.25])
+    # Gripper joint position above which it counts as closed, below ``open`` as open.
+    gripper_closed_above: float = 0.4
+    gripper_open_below: float = 0.08
     success_radius_m: float = 0.015
     # Steps after which the step counter restarts (the env's time limit, in steps).
     episode_steps: int = 100

@@ -121,6 +121,21 @@ class ActorRun:
         return transitions
 
 
+def close_env(env, teleop) -> None:
+    """Log the robot's limit counters, hold and disconnect it, then the teleoperator; never raises."""
+    counters = getattr(getattr(env, "robot", None), "counters", None)
+    if counters is not None:
+        logging.info(f"[ACTOR] robot limit counters: {counters()}")
+    for name, closer in (("environment", getattr(env, "close", None)), ("teleop", getattr(teleop, "disconnect", None))):
+        if closer is None:
+            continue
+        try:
+            closer()
+            logging.info(f"[ACTOR] {name} closed")
+        except Exception as e:
+            logging.error(f"[ACTOR] closing the {name} failed: {e}")
+
+
 def install(settings: RunSettings, run_dir: Path) -> None:
     """Point lerobot's actor at this repo's environment and add the episode hooks."""
     from . import compat
@@ -139,12 +154,19 @@ def install(settings: RunSettings, run_dir: Path) -> None:
         save_run_meta(run_dir, "actor", cfg, {"run_settings": dataclasses.asdict(settings)})
         say = (lambda text: log_say(text, play_sounds=True)) if settings.announce else None
         state["run"] = ActorRun(run_dir, settings, say=say)
-        return original_act(cfg, *args, **kwargs)
+        try:
+            return original_act(cfg, *args, **kwargs)
+        finally:
+            # Upstream's actor never closes its environment. Without this the arm is only
+            # stopped by the watchdog, and the process can hang at exit with the ROS
+            # executor thread still alive (seen in Gazebo).
+            close_env(state.get("env"), state.get("teleop"))
 
     def _make_robot_env(cfg):
         require_motion_confirmation(cfg.robot, settings)
         run = state["run"]
-        return make_robot_env(cfg, on_reset=run.on_reset if run is not None else None)
+        state["env"], state["teleop"] = make_robot_env(cfg, on_reset=run.on_reset if run is not None else None)
+        return state["env"], state["teleop"]
 
     def push_transitions(transitions, transitions_queue):
         if state["run"] is not None:

@@ -1,0 +1,241 @@
+{
+  "output_dir": null,
+  "job_name": "gen3_lite_cup_baseline",
+  "resume": false,
+  "seed": 0,
+  "batch_size": 256,
+  "log_freq": 100,
+  "save_checkpoint": true,
+  "save_freq": 20000,
+  "wandb": {
+    "enable": false,
+    "project": "gen3_lite_hilserl"
+  },
+  "dataset": {
+    "repo_id": "local/gen3_lite_cup_hil_demos",
+    "root": "data/gen3_lite_cup_hil_demos"
+  },
+  "mixer": "online_offline",
+  "online_ratio": 0.5,
+  "policy": {
+    "type": "gaussian_actor",
+    "device": "cuda",
+    "storage_device": "cpu",
+    "push_to_hub": false,
+    "input_features": {
+      "observation.images.front": {
+        "type": "VISUAL",
+        "shape": [
+          3,
+          128,
+          128
+        ]
+      },
+      "observation.state": {
+        "type": "STATE",
+        "shape": [
+          10
+        ]
+      }
+    },
+    "output_features": {
+      "action": {
+        "type": "ACTION",
+        "shape": [
+          3
+        ]
+      }
+    },
+    "normalization_mapping": {
+      "VISUAL": "MEAN_STD",
+      "STATE": "MIN_MAX",
+      "ENV": "MIN_MAX",
+      "ACTION": "MIN_MAX"
+    },
+    "dataset_stats": {
+      "observation.images.front": {
+        "mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "std": [
+          0.229,
+          0.224,
+          0.225
+        ]
+      },
+      "observation.state": {
+        "min": [
+          -2.68,
+          -2.61,
+          -2.61,
+          -2.6,
+          -2.53,
+          -2.6,
+          0.0,
+          0.09999999999999999,
+          -0.020000000000000004,
+          -0.010000000000000002
+        ],
+        "max": [
+          2.68,
+          2.61,
+          2.61,
+          2.6,
+          2.53,
+          2.6,
+          0.85,
+          0.48,
+          0.33999999999999997,
+          0.45
+        ]
+      },
+      "action": {
+        "min": [
+          -1.0,
+          -1.0,
+          -1.0
+        ],
+        "max": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    "vision_encoder_name": "helper2424/resnet10",
+    "freeze_vision_encoder": true,
+    "shared_encoder": true,
+    "num_discrete_actions": 3,
+    "online_steps": 100000,
+    "online_buffer_capacity": 50000,
+    "offline_buffer_capacity": 20000,
+    "online_step_before_learning": 100,
+    "async_prefetch": false,
+    "actor_learner_config": {
+      "learner_host": "127.0.0.1",
+      "learner_port": 50051,
+      "policy_parameters_push_frequency": 4,
+      "queue_get_timeout": 2
+    },
+    "concurrency": {
+      "actor": "threads",
+      "learner": "threads"
+    }
+  },
+  "algorithm": {
+    "type": "sac",
+    "utd_ratio": 2,
+    "discount": 0.97,
+    "temperature_init": 0.01,
+    "num_critics": 2,
+    "policy_update_freq": 1,
+    "grad_clip_norm": 10.0,
+    "actor_lr": 0.0003,
+    "critic_lr": 0.0003,
+    "temperature_lr": 0.0003
+  },
+  "env": {
+    "type": "gym_manipulator",
+    "name": "real_robot",
+    "task": "gen3_lite_cup_pick_place",
+    "fps": 10,
+    "robot": {
+      "type": "gen3_lite_hil",
+      "use_gripper": true,
+      "fixed_gripper_position": null,
+      "control_period_s": 0.1,
+      "ee_step_size_m": 0.01,
+      "max_ee_step_m": 0.01,
+      "max_ee_speed_m_s": 0.1,
+      "ee_bounds_min": [
+        0.15,
+        0.03,
+        0.04
+      ],
+      "ee_bounds_max": [
+        0.43,
+        0.29,
+        0.3
+      ],
+      "watchdog_periods": 3.0,
+      "max_obs_age_s": 0.2,
+      "home_on_connect": true,
+      "cameras": {
+        "front": {
+          "type": "opencv",
+          "index_or_path": 0,
+          "fps": 30,
+          "width": 640,
+          "height": 480
+        }
+      },
+      "reset_joint_positions": [
+        -0.255,
+        -0.607,
+        2.202,
+        0.249,
+        -1.469,
+        -1.227
+      ]
+    },
+    "teleop": {
+      "type": "gamepad",
+      "use_gripper": true
+    },
+    "processor": {
+      "control_mode": "gamepad",
+      "observation": {
+        "display_cameras": false
+      },
+      "image_preprocessing": {
+        "crop_params_dict": null,
+        "resize_size": [
+          128,
+          128
+        ]
+      },
+      "gripper": {
+        "use_gripper": true,
+        "gripper_penalty": -0.02
+      },
+      "reset": {
+        "reset_time_s": 8.0,
+        "control_time_s": 20.0,
+        "terminate_on_success": true,
+        "fixed_reset_joint_positions": null
+      },
+      "inverse_kinematics": null,
+      "reward_classifier": null,
+      "max_gripper_pos": null
+    },
+    "features": {
+      "observation.images.front": {
+        "type": "VISUAL",
+        "shape": [
+          3,
+          128,
+          128
+        ]
+      },
+      "observation.state": {
+        "type": "STATE",
+        "shape": [
+          10
+        ]
+      },
+      "action": {
+        "type": "ACTION",
+        "shape": [
+          3
+        ]
+      }
+    },
+    "features_map": {
+      "observation.images.front": "observation.images.front",
+      "observation.state": "observation.state",
+      "action": "action"
+    }
+  }
+}

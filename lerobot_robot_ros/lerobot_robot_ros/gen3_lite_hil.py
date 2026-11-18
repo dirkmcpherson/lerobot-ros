@@ -51,8 +51,13 @@ class Gen3LiteHil(Gen3LiteRos):
         self._ref_pos: np.ndarray | None = None
         self._ref_rot: np.ndarray | None = None
         self._ref_joints: np.ndarray | None = None
+        # Tool orientation every command holds (roll, pitch and yaw are frozen). None:
+        # hold whatever orientation the tool has when control (re)starts.
+        self._frozen_rot: np.ndarray | None = None
+        self._last_orientation_warning = 0.0
         self._gripper_target: float | None = None
         self._last_cmd_time: float | None = None
+        self._has_commanded = False  # True once this object has sent the arm anything
 
         self._watchdog_thread: threading.Thread | None = None
         self._watchdog_stop = threading.Event()
@@ -60,10 +65,30 @@ class Gen3LiteHil(Gen3LiteRos):
 
         # Counters, readable by tests, the smoke test and the run logs.
         self.watchdog_trips = 0
-        self.clipped_commands = 0
+        self.clipped_commands = 0  # any of the three below
+        self.step_clipped_commands = 0  # longer than max_ee_step_m / the speed limit (any diagonal unit action is)
+        self.lead_clipped_commands = 0  # target too far ahead of the measured tool
+        self.box_clipped_commands = 0  # target outside the tool box
+        # Commands shortened by the per-joint step cap (max_relative_target against the
+        # measured joints). With the arm lagging its target this binds on fast joints.
+        self.joint_capped_commands = 0
         self.ik_rejections = 0
         self.stale_stops = 0
         self.last_report: StepReport | None = None
+
+    def counters(self) -> dict[str, int]:
+        """How often each limit acted since this object was created."""
+        return {
+            "clipped_commands": self.clipped_commands,
+            "step_clipped_commands": self.step_clipped_commands,
+            "lead_clipped_commands": self.lead_clipped_commands,
+            "box_clipped_commands": self.box_clipped_commands,
+            "joint_capped_commands": self.joint_capped_commands,
+            "guard_blocks": self.blocked_commands,
+            "ik_rejections": self.ik_rejections,
+            "stale_stops": self.stale_stops,
+            "watchdog_trips": self.watchdog_trips,
+        }
 
     # ------------------------------------------------------------------ features
 
@@ -112,6 +137,8 @@ class Gen3LiteHil(Gen3LiteRos):
                 self.config.ros2_interface.ee_link,
             )
         self._invalidate_reference()
+        if self.config.reset_joint_positions is not None:
+            self.freeze_orientation_at(self.config.reset_joint_positions)
         try:
             super().connect(calibrate)  # guard setup, backend connect, optional homing
         except Exception:
@@ -131,6 +158,7 @@ class Gen3LiteHil(Gen3LiteRos):
         except ImportError:
             return
         TOOL_POSITION_SOURCE["get"] = lambda: self._kin.fk(self._measured_arm()[0])[0]
+        TOOL_POSITION_SOURCE["gripper"] = lambda: self._measured_arm()[1]
 
     def disconnect(self) -> None:
         if self._watchdog_thread is not None:
@@ -139,16 +167,74 @@ class Gen3LiteHil(Gen3LiteRos):
             self._watchdog_thread = None
         if not self.is_connected:
             return
-        try:
-            self.hold("disconnect")
-        except Exception as e:  # still release the backend
-            logger.error(f"Could not command a hold before disconnecting: {e}")
+        if self._has_commanded:  # a session that only observed sends nothing at all
+            try:
+                self.hold("disconnect")
+            except Exception as e:  # still release the backend
+                logger.error(f"Could not command a hold before disconnecting: {e}")
         super().disconnect()
+
+    def set_tool_box(self, bounds_min: list[float], bounds_max: list[float]) -> None:
+        """Change the box commands are clipped to, effective from the next command."""
+        cfg = self.config
+        previous = (cfg.ee_bounds_min, cfg.ee_bounds_max)
+        cfg.ee_bounds_min, cfg.ee_bounds_max = [float(v) for v in bounds_min], [float(v) for v in bounds_max]
+        try:
+            cfg.validate_tool_box()
+        except ValueError:
+            cfg.ee_bounds_min, cfg.ee_bounds_max = previous
+            raise
+        with self._cmd_lock:
+            self._limits = cfg.ee_limits()
+
+    def freeze_orientation_at(self, joints: list[float] | None) -> None:
+        """Freeze the tool's roll, pitch and yaw at the orientation of this joint pose (the
+        episode start pose). Every command then holds exactly that orientation, the same
+        in every episode, instead of the orientation measured when control restarted."""
+        with self._cmd_lock:
+            self._frozen_rot = None if joints is None else self._kin.fk(joints)[1]
+            self._invalidate_reference()
+
+    def held_orientation(self) -> np.ndarray:
+        """The tool orientation the next command will hold (3x3, base frame)."""
+        with self._cmd_lock:
+            for rot in (self._ref_rot, self._frozen_rot):
+                if rot is not None:
+                    return rot.copy()
+            return self._kin.fk(self._measured_arm()[0])[1]
+
+    def set_held_orientation(self, rot: np.ndarray) -> None:
+        """Change the frozen orientation, about the tool point. The next commands carry the
+        wrist there through the usual limits, so change it in small steps. For choosing
+        the grasp orientation during setup; the policy's actions never turn the tool."""
+        with self._cmd_lock:
+            self._frozen_rot = np.asarray(rot, dtype=float).copy()
+            if self._ref_rot is not None:
+                self._ref_rot = self._frozen_rot.copy()
+
+    def _orientation_to_hold(self, measured_rot: np.ndarray) -> np.ndarray:
+        if self._frozen_rot is None:
+            return measured_rot
+        cos = (np.trace(self._frozen_rot.T @ measured_rot) - 1.0) / 2.0
+        off = float(np.arccos(np.clip(cos, -1.0, 1.0)))
+        if off <= self.config.max_orientation_offset_rad:
+            return self._frozen_rot
+        # Far from the frozen orientation (the arm was not brought to the start pose):
+        # do not swing the wrist there; hold what it has.
+        now = time.monotonic()
+        if now - self._last_orientation_warning > 5.0:
+            self._last_orientation_warning = now
+            logger.warning(
+                f"Tool orientation is {off:.2f} rad from the frozen one (limit "
+                f"{self.config.max_orientation_offset_rad} rad); holding the current orientation instead."
+            )
+        return measured_rot
 
     def go_home(self, position: list[float] | None = None) -> None:
         with self._cmd_lock:
             self._watchdog_armed = False
             self._invalidate_reference()
+            self._has_commanded = True
         super().go_home(position)
         with self._cmd_lock:
             self._invalidate_reference()
@@ -247,7 +333,8 @@ class Gen3LiteHil(Gen3LiteRos):
 
             dt = None if self._last_cmd_time is None else now - self._last_cmd_time
             if self._ref_pos is None or dt is None or dt > cfg.resync_after_s:
-                self._ref_pos, self._ref_rot, self._ref_joints = measured_pos, measured_rot, arm
+                self._ref_pos, self._ref_joints = measured_pos, arm
+                self._ref_rot = self._orientation_to_hold(measured_rot)
                 self._gripper_target = None
                 dt = None
 
@@ -255,8 +342,10 @@ class Gen3LiteHil(Gen3LiteRos):
                 [action.get(k, 0.0) for k in DELTA_KEYS], self._ref_pos, measured_pos, self._limits, dt
             )
             self.last_report = report
-            if report.any_clipped:
-                self.clipped_commands += 1
+            self.clipped_commands += report.any_clipped
+            self.step_clipped_commands += report.action_clipped or report.step_clipped
+            self.lead_clipped_commands += report.lead_clipped
+            self.box_clipped_commands += report.box_clipped
 
             joints, pos_err, rot_err = self._kin.ik(
                 self._ref_joints,
@@ -265,27 +354,62 @@ class Gen3LiteHil(Gen3LiteRos):
                 lower=cfg.ros2_interface.min_joint_positions,
                 upper=cfg.ros2_interface.max_joint_positions,
             )
-            if pos_err > cfg.ik_position_tolerance_m or rot_err > cfg.ik_orientation_tolerance_rad:
-                # Unreachable with the held orientation: do not move the arm for this step.
+            jump = float(np.abs(np.asarray(joints) - self._ref_joints).max())
+            if (
+                pos_err > cfg.ik_position_tolerance_m
+                or rot_err > cfg.ik_orientation_tolerance_rad
+                or jump > cfg.ik_max_joint_step_rad
+            ):
+                # Unreachable with the held orientation, or reachable only by swinging a
+                # joint a long way for a small tool step (near a wrist singularity): do
+                # not move the arm for this step.
                 self.ik_rejections += 1
                 logger.warning(
-                    f"IK rejected a step (position error {pos_err * 1000:.1f} mm, "
-                    f"orientation error {rot_err:.3f} rad); holding."
+                    f"IK rejected a step (position error {pos_err * 1000:.1f} mm, orientation error "
+                    f"{rot_err:.3f} rad, largest joint change {jump:.3f} rad); holding."
                 )
                 joints, target_pos = self._ref_joints, self._ref_pos
 
-            joint_action: dict[str, Any] = dict(zip(self._arm_keys, np.asarray(joints).tolist(), strict=True))
+            # Per-joint step cap, applied to the whole joint step at once. The parent class
+            # clamps each joint separately against the measured pose; once the arm lags its
+            # target that clamps the fast joints and not the others, and the mixed pose is
+            # off the intended line (seen in Gazebo: the tool commanded 2 cm outside its
+            # box, stopped by the workspace guard). Scaling every joint by the same factor
+            # keeps the command on the joint-space segment from the measured pose to the
+            # target, both of which are on the line. The parent's clamp stays underneath
+            # and no longer has anything to do.
+            command = np.asarray(joints, dtype=float)
+            if cfg.max_relative_target is not None:
+                farthest = float(np.abs(command - arm).max())
+                cap = 0.999 * float(cfg.max_relative_target)
+                if farthest > cap:
+                    command = arm + (command - arm) * (cap / farthest)
+                    self.joint_capped_commands += 1
+
+            joint_action: dict[str, Any] = dict(zip(self._arm_keys, command.tolist(), strict=True))
             gripper = self._gripper_command(action, grip_meas)
             if gripper is not None:
                 joint_action["gripper.pos"] = gripper
 
+            blocked_before = self.blocked_commands
             sent = self.send_joint_action(joint_action)  # step cap + workspace guard + ROS
             sent_joints = np.array([float(sent[k]) for k in self._arm_keys])
-            sent_pos, _ = self._kin.fk(sent_joints)
-            applied = sent_pos - self._ref_pos
-            self._ref_pos, self._ref_joints = sent_pos, sent_joints
+            if self.blocked_commands != blocked_before:
+                # The guard held the arm at its last accepted target: restart from there.
+                new_ref_pos, new_ref_joints = self._kin.fk(sent_joints)[0], sent_joints
+            else:
+                # Where the joint cap shortened what was sent, the reference still advances
+                # along the intended line and the arm catches up over the next commands.
+                # (Taking the shortened pose as the new reference bends the path a little
+                # more on every capped step: 5 mm of z over 13 cm of x in Gazebo.) The
+                # reference cannot run away: limit_step keeps it within max_ee_lead_m of
+                # the measured tool, and a far-off IK solution was rejected above.
+                new_ref_pos, new_ref_joints = np.asarray(target_pos), np.asarray(joints)
+            applied = new_ref_pos - self._ref_pos
+            self._ref_pos, self._ref_joints = new_ref_pos, new_ref_joints
             self._last_cmd_time = now
             self._watchdog_armed = True
+            self._has_commanded = True
 
         out: dict[str, Any] = dict(zip(DELTA_KEYS, (applied / cfg.ee_step_size_m).tolist(), strict=True))
         if cfg.use_gripper:

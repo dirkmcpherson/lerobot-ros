@@ -18,8 +18,9 @@ class Gen3LiteHilConfig(Gen3LiteRosConfig):
 
     Actions: ``delta_x``, ``delta_y``, ``delta_z`` in [-1, 1] (one unit is
     ``ee_step_size_m`` of tool travel in the base frame) and, when ``use_gripper``,
-    ``gripper`` (0 close, 1 stay, 2 open: lerobot's gamepad convention). The tool
-    orientation is held at its value when control (re)starts.
+    ``gripper`` (0 close, 1 stay, 2 open: lerobot's gamepad convention). The tool's
+    roll, pitch and yaw are frozen: at the orientation of ``reset_joint_positions`` when
+    that is set, otherwise at whatever the tool has when control (re)starts.
 
     Observations: ``joint_1.pos`` .. ``joint_6.pos`` (rad), ``gripper.pos`` (measured
     finger joint, 0.0 open .. 0.85 closed), ``ee.x`` / ``ee.y`` / ``ee.z`` (tool frame in
@@ -49,7 +50,15 @@ class Gen3LiteHilConfig(Gen3LiteRosConfig):
     ee_bounds_max: list[float] = field(default_factory=lambda: [0.43, 0.29, 0.40])
     # A command whose IK solution misses the target by more than this is not sent.
     ik_position_tolerance_m: float = 0.004
-    ik_orientation_tolerance_rad: float = 0.1
+    ik_orientation_tolerance_rad: float = 0.03
+    # With the orientation frozen at the reset pose: if the tool is further than this from
+    # it when control starts, the current orientation is held instead (and a warning
+    # logged) rather than swinging the wrist over.
+    max_orientation_offset_rad: float = 0.15
+    # ... and so is one whose solution moves any joint further than this from the previous
+    # target (rad). A 1 cm tool step is a few hundredths of a radian away from
+    # singularities; a large jump means the wrist is about to reconfigure.
+    ik_max_joint_step_rad: float = 0.2
 
     # --- Watchdog and staleness ---
     # If no action arrives for this many control periods after the last one, the arm is
@@ -68,6 +77,11 @@ class Gen3LiteHilConfig(Gen3LiteRosConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        self.validate_tool_box()
+        if self.watchdog_periods < 1:
+            raise ValueError("watchdog_periods must be at least 1")
+
+    def validate_tool_box(self) -> None:
         self.ee_limits().validate()
         if self.workspace_min is not None and self.workspace_max is not None:
             lo_ok = all(a >= b for a, b in zip(self.ee_bounds_min, self.workspace_min, strict=True))
@@ -77,8 +91,6 @@ class Gen3LiteHilConfig(Gen3LiteRosConfig):
                     f"ee_bounds {self.ee_bounds_min}..{self.ee_bounds_max} must lie inside the workspace "
                     f"guard box {self.workspace_min}..{self.workspace_max}"
                 )
-        if self.watchdog_periods < 1:
-            raise ValueError("watchdog_periods must be at least 1")
 
     def ee_limits(self):
         from .ee_delta import EeLimits
@@ -102,10 +114,16 @@ class Gen3LiteHilConfig(Gen3LiteRosConfig):
             f"  guard box (hard backstop) : {self.workspace_min} .. {self.workspace_max}\n"
             f"  table plane               : z={self.plane_z} m, margin {self.plane_margin} m"
             f" (guard {'on' if self.guard_enabled else 'OFF'})\n"
+            f"  no-go boxes (+{self.no_go_margin} m)      : "
+            + ("; ".join(f"'{b.name}' {b.min} .. {b.max}" for b in self.no_go_boxes) or "none")
+            + "\n"
             f"  per-joint step cap        : {self.max_relative_target} rad per command\n"
             f"  watchdog                  : hold after {self.watchdog_periods * self.control_period_s:.2f} s"
             " without a command\n"
             f"  stale observation limit   : {self.max_obs_age_s:.2f} s\n"
             f"  home on connect           : {self.home_on_connect} ({self.home_position}, {self.home_speed} rad/s)\n"
-            f"  episode reset pose        : {self.reset_joint_positions}"
+            f"  episode reset pose        : {self.reset_joint_positions}\n"
+            "  tool orientation          : frozen ("
+            + ("at the reset pose's" if self.reset_joint_positions is not None else "at its value when control starts")
+            + f"); a step that would turn it more than {self.ik_orientation_tolerance_rad} rad is not sent"
         )

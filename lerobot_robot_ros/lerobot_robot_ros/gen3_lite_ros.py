@@ -27,38 +27,54 @@ class Gen3LiteRos(BackendRobot):
 
     def connect(self, calibrate: bool = True) -> None:
         cfg = self.config
+        if cfg.no_go_boxes and not cfg.guard_enabled:
+            raise ValueError("no_go_boxes are set but guard_enabled is false: they would not be enforced")
         if cfg.guard_enabled:
-            from lerobot_backends.ros2.workspace_guard import (
-                WorkspaceGuard,
-                gen3_lite_srdf,
-                gen3_lite_urdf,
-            )
-
-            iface = cfg.ros2_interface
-            self._guard = WorkspaceGuard(
-                urdf_path=cfg.urdf_path or gen3_lite_urdf(),
-                arm_joint_names=iface.arm_joint_names,
-                gripper_joint_name=iface.gripper_joint_name,
-                plane_z=cfg.plane_z,
-                plane_margin=cfg.plane_margin,
-                self_margin=cfg.self_collision_margin,
-                box_min=cfg.workspace_min,
-                box_max=cfg.workspace_max,
-                srdf_path=gen3_lite_srdf(),
-                package_dirs=cfg.mesh_package_dirs,
-            )
+            self._guard = self._build_guard()
         super().connect(calibrate)
         if self._guard is not None:
             arm, grip = self._measured()
             violation, reason = self._guard.assess(arm, grip)
+            boxes = ", ".join(f"'{b.name}' {b.min}..{b.max}" for b in cfg.no_go_boxes) or "none"
             logger.info(
                 f"Workspace guard on: table plane z={cfg.plane_z} (+{cfg.plane_margin} m), "
-                f"tool box {cfg.workspace_min}..{cfg.workspace_max}. Start pose: "
+                f"tool box {cfg.workspace_min}..{cfg.workspace_max}, no-go boxes (+{cfg.no_go_margin} m): "
+                f"{boxes}. Start pose: "
                 + (f"VIOLATES ({reason}); only moves that reduce it are allowed" if violation else "ok")
             )
 
         if cfg.home_on_connect and cfg.home_position is not None:
             self.go_home()
+
+    def _build_guard(self):
+        from lerobot_backends.ros2.workspace_guard import WorkspaceGuard, gen3_lite_srdf, gen3_lite_urdf
+
+        cfg, iface = self.config, self.config.ros2_interface
+        if getattr(self, "_guard_urdf", None) is None:
+            self._guard_urdf = cfg.urdf_path or gen3_lite_urdf()
+        return WorkspaceGuard(
+            urdf_path=self._guard_urdf,
+            arm_joint_names=iface.arm_joint_names,
+            gripper_joint_name=iface.gripper_joint_name,
+            plane_z=cfg.plane_z,
+            plane_margin=cfg.plane_margin,
+            self_margin=cfg.self_collision_margin,
+            box_min=cfg.workspace_min,
+            box_max=cfg.workspace_max,
+            srdf_path=gen3_lite_srdf(),
+            package_dirs=cfg.mesh_package_dirs,
+            no_go_boxes=[{"name": b.name, "min": b.min, "max": b.max} for b in cfg.no_go_boxes],
+            no_go_margin=cfg.no_go_margin,
+        )
+
+    def set_no_go_boxes(self, boxes) -> None:
+        """Replace the no-go boxes and rebuild the guard (takes a second or two)."""
+        self.config.no_go_boxes = list(boxes)
+        if self.config.guard_enabled:
+            self._guard = self._build_guard()
+            self._held_arm = None
+        elif boxes:
+            logger.warning("guard_enabled is false: the no-go boxes are recorded but NOT enforced.")
 
     def go_home(self, position: list[float] | None = None) -> None:
         """Drive the arm to home_position (or ``position``) along a straight joint-space path at home_speed,

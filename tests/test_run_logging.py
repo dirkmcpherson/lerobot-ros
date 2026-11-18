@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from hilserl_gen3_lite.actor import ActorRun
+from hilserl_gen3_lite.actor import ActorRun, close_env
 from hilserl_gen3_lite.eval_schedule import EvalSchedule
 from hilserl_gen3_lite.run_logging import CsvLog, read_csv, rise_time
 from hilserl_gen3_lite.settings import RunSettings, pop_run_settings, require_motion_confirmation, run_dir_and_argv
@@ -129,3 +129,27 @@ def test_actor_run_logs_episodes_and_eval_blocks_and_survives_a_restart(tmp_path
     again.on_reset()
     again.on_episode(_episode(4))
     assert read_csv(tmp_path / "episodes.csv")[-1]["episode"] == "5"
+
+
+def test_close_env_closes_both_and_never_raises():
+    calls = []
+
+    class Robot:
+        def counters(self):
+            calls.append("counters")
+            return {"guard_blocks": 0}
+
+    class Env:
+        robot = Robot()
+
+        def close(self):
+            calls.append("env")
+            raise RuntimeError("driver gone")
+
+    class Teleop:
+        def disconnect(self):
+            calls.append("teleop")
+
+    close_env(Env(), Teleop())  # the env failing must not stop the teleop being released
+    close_env(None, None)
+    assert calls == ["counters", "env", "teleop"]

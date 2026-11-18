@@ -1,8 +1,10 @@
-"""Workspace guard for joint-position commands: table plane, tool box, self-collision.
+"""Workspace guard for joint-position commands: table plane, tool box, no-go boxes, self-collision.
 
 Checks a commanded arm configuration against
   * a horizontal plane (the table) that every moving link must clear by ``plane_margin``,
   * an axis-aligned box the tool frame must stay inside,
+  * no-go boxes (camera, fixtures, anything rigid in reach) that every moving link,
+    fingers included, must clear by ``no_go_margin``,
   * self-collision between links (pairs listed as never-colliding in the SRDF are skipped),
 using the URDF collision meshes (pinocchio + hpp-fcl, via ``user_input.collision``).
 
@@ -17,6 +19,8 @@ import tempfile
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+NO_GO_PREFIX = "no_go:"
 
 
 def gen3_lite_urdf() -> str:
@@ -58,6 +62,8 @@ class WorkspaceGuard:
         box_frame: str = "tool_frame",
         srdf_path: str | None = None,
         package_dirs: list[str] | None = None,
+        no_go_boxes: list[dict] | None = None,
+        no_go_margin: float = 0.02,
     ):
         import pinocchio as pin
 
@@ -73,6 +79,20 @@ class WorkspaceGuard:
         self._box_max = None if box_max is None else np.asarray(box_max, float)
         self.plane_margin = plane_margin
         self.self_margin = self_margin
+        self.no_go_margin = no_go_margin
+        # Axis-aligned boxes in the base frame: {"name": str, "min": [x, y, z], "max": [x, y, z]}.
+        obstacles = []
+        for i, box in enumerate(no_go_boxes or []):
+            lo, hi = np.asarray(box["min"], float), np.asarray(box["max"], float)
+            if lo.shape != (3,) or hi.shape != (3,) or not np.all(lo < hi):
+                raise ValueError(f"no-go box {box} needs 3-D min < max")
+            obstacles.append(
+                {
+                    "name": f"{NO_GO_PREFIX}{box.get('name') or i}",
+                    "half_extents": ((hi - lo) / 2).tolist(),
+                    "position": ((hi + lo) / 2).tolist(),
+                }
+            )
 
         if package_dirs is None:
             # Directory that contains kortex_description/, to resolve the URDF's package:// meshes.
@@ -86,6 +106,7 @@ class WorkspaceGuard:
             package_dirs=package_dirs,
             srdf_path=srdf_path,
             ground_plane_z=plane_z,
+            obstacles=obstacles,
         )
         checker.setup(self.model)
         self._geom_model = checker._geom_model
@@ -96,6 +117,13 @@ class WorkspaceGuard:
         self._is_plane_pair = np.array(
             [p.first in ground or p.second in ground for p in self._geom_model.collisionPairs]
         )
+        no_go = [
+            i for i, g in enumerate(self._geom_model.geometryObjects) if g.name.startswith(NO_GO_PREFIX)
+        ]
+        self._is_no_go_pair = np.array(
+            [p.first in no_go or p.second in no_go for p in self._geom_model.collisionPairs], dtype=bool
+        )
+        self.no_go_names = [self._geom_model.geometryObjects[i].name[len(NO_GO_PREFIX) :] for i in no_go]
 
     def _q(self, arm: list[float], gripper: float) -> np.ndarray:
         q = self._pin.neutral(self.model)
@@ -131,9 +159,18 @@ class WorkspaceGuard:
             link = self._geom_model.geometryObjects[self._geom_model.collisionPairs[k].first].name
             violation += self.plane_margin - plane.min()
             reasons.append(f"{link} {plane.min() * 100:.1f} cm above table plane")
-        selfd = dist[~self._is_plane_pair]
+        no_go = dist[self._is_no_go_pair]
+        if no_go.size and no_go.min() < self.no_go_margin:
+            k = int(np.flatnonzero(self._is_no_go_pair)[no_go.argmin()])
+            pair = self._geom_model.collisionPairs[k]
+            names = [self._geom_model.geometryObjects[i].name for i in (pair.first, pair.second)]
+            link, box = (names[0], names[1]) if names[1].startswith(NO_GO_PREFIX) else (names[1], names[0])
+            violation += self.no_go_margin - no_go.min()
+            reasons.append(f"{link} {no_go.min() * 100:.1f} cm from no-go box '{box[len(NO_GO_PREFIX):]}'")
+        is_self = ~(self._is_plane_pair | self._is_no_go_pair)
+        selfd = dist[is_self]
         if selfd.size and selfd.min() < self.self_margin:
-            k = int(np.flatnonzero(~self._is_plane_pair)[selfd.argmin()])
+            k = int(np.flatnonzero(is_self)[selfd.argmin()])
             pair = self._geom_model.collisionPairs[k]
             names = [self._geom_model.geometryObjects[i].name for i in (pair.first, pair.second)]
             violation += self.self_margin - selfd.min()

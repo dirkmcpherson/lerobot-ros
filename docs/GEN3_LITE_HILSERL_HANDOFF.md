@@ -1,262 +1,411 @@
-# Handoff: test Gen3 Lite HIL-SERL in Gazebo on the GPU machine
+# Handoff: first real-arm session, pick and place a plastic cup
 
-Written 2026-11-18 for whoever picks this up next (a coding agent, most likely) on a
-machine with an RTX 3080 and Gazebo. Read this first, then
-[GEN3_LITE_HILSERL.md](GEN3_LITE_HILSERL.md) for the design, the limits and the logs.
+Written 2026-11-18 for the agent working with the operator at the robot machine. Read
+this first, then [GEN3_LITE_HILSERL.md](GEN3_LITE_HILSERL.md) for the design, the limits,
+the log formats and what has been verified where.
 
-## Where things stand
+## The plan
 
-Stock LeRobot HIL-SERL (lerobot 0.6.1) is wired to the Kinova Gen3 Lite through this
-repo's ROS 2 stack: an end-effector delta robot class with its safety limits, takeover
-flags and provenance tags on every stored transition, entry points that wrap the
-unmodified upstream learner and actor, and CSV run logs. All of it was written on a
-laptop with no ROS install, no GPU and no arm.
+The operator has decided to skip a simulation pass on the robot machine and learn
+directly on the arm:
 
-What that leaves untested, and what this pass is for:
+- **Task:** pick up a plastic cup and place it on a marked spot.
+- **Observations:** one camera, head-on to the arm, plus proprioception (six joint
+  angles, the gripper joint, the tool position).
+- **Actions:** tool x, y, z deltas and the gripper (close / stay / open). Roll, pitch and
+  yaw of the tool are frozen for the whole task, at an orientation chosen during setup.
+- **Protection:** a tool box the commands are clipped to, plus no-go boxes around
+  anything rigid in reach (the camera, fixtures), taught interactively in step 3.
+- **Reward:** the operator's success key on the gamepad.
+- **Learner:** stock LeRobot 0.6.1 HIL-SERL, unchanged.
+
+The goal of the session is one complete baseline run with its curves and rise-time
+numbers, and an honest account of everything that went wrong on the way.
+
+## Who does what
+
+**The operator runs every command that moves the arm, with a hand on the emergency
+stop. You never do.** You prepare, check, edit configs, run what does not move the arm,
+watch logs and analyse results.
+
+| Moves the arm (operator only) | Does not move the arm (you may run) |
+|---|---|
+| `hilserl_gen3_lite.smoke_test` | `python -m pytest` |
+| `hilserl_gen3_lite.workspace` | anything with a `dryrun_*` config (fake arm) |
+| `hilserl_gen3_lite.record` | `hilserl_gen3_lite.learner` (it only talks to the actor) |
+| `hilserl_gen3_lite.actor` | `hilserl_gen3_lite.summarize_run`, `lerobot-find-cameras`, `lerobot.rl.crop_dataset_roi` |
+| | reading topics, e.g. `ros2 topic hz /joint_states` |
+
+The four commands on the left refuse to start on the real arm without
+`--run.confirm_motion=true` and print their limits first. Hand the operator the exact
+command; do not pass that flag yourself. Launching the kortex driver does not move the
+arm, but leave that to the operator too. Other rules:
+
+- Do not change the SAC losses, the batch sampling ratios, the network architecture, the
+  lerobot version, controller gains or Kinova's protection zones.
+- Do not loosen the default limits in `Gen3LiteHilConfig`. Task-specific bounds go in
+  the JSON configs.
+- If a log suggests the arm went past a limit (the tool outside `ee_bounds` by more than
+  a couple of centimetres of lag, or a commanded step longer than 1 cm), stop and tell
+  the operator before anything else.
+- A fix to the adapter or the glue comes with a test. Do not commit or push unless asked.
+
+## Where the system stands
+
+| Verified | Where |
+|---|---|
+| 92 hardware-free tests | laptop |
+| Smoke test, 16 targeted checks, three full learner + actor runs against the real `joint_trajectory_controller` and gripper controller (state-only reach) | Gazebo in a container, laptop, CPU |
+| The gripper path end to end: 4-number actions, the discrete gripper head, the toggle penalty, a scripted pick and place between two points | fake arm with images (24 episodes) and Gazebo state-only (28 of 28 episodes), laptop, CPU |
+| Frozen orientation (0.1 degrees of deviation while moving), a no-go box (arm stops with every link outside the margin), and the interactive workspace tool end to end | Gazebo, laptop, CPU |
+| The policy and SAC build from the cup config | laptop, CPU |
+
+Never exercised, so expect the first surprises here:
 
 | Never exercised | Why it matters |
 |---|---|
-| The real `joint_trajectory_controller` (a new one-point goal every 100 ms, each preempting the last) | The laptop check used a stand-in driver that jumps to each goal instantly. Tracking lag, goal rejection and stop-go motion are all unknown. |
-| CUDA | Every run so far was CPU. The replay buffer's `torch.compile` path has never run at all (the laptop has no C++ compiler). |
-| The mesh-based workspace guard from the installed `kortex_description` | Tested only against a URDF copied into `tests/fixtures/`. |
-| A run long enough to show learning | The longest run was 600 steps on a fake arm. |
+| The physical arm with this code | Gravity, friction and real tracking lag. In Gazebo lag was about 2 cm at 0.1 m/s and 1 mm after settling. |
+| A real camera | Frame rate, latency, exposure; the 200 ms stale-frame limit. |
+| The gamepad in a hand | Button numbers differ between controllers; see step 3. |
+| CUDA, and `torch.compile` in the replay buffer | Every run so far was on CPU, on a machine with no C++ compiler. |
+| Images against real controllers | Images have only run with the fake arm. One image bug (demo images 255 times too bright) was found late; it is fixed and tested. |
+| Grasping a physical object | Gazebo had no cup. The scripted "pick and place" closed and opened the gripper at two points in the air. |
+| Learning this task | No run has learned a pick and place; the Gazebo gripper run was 1500 steps with the scripted operator driving nearly all of them. |
 
-**Goal of this pass:** find out whether the system works against real ros2_control
-controllers in Gazebo and on the GPU, and report what you measured, so the operator's
-first session on the physical arm is not spent finding plumbing bugs. Fix what is broken
-in the adapter or the glue; do not tune the learner.
+## What changed for this task
 
-## Rules
+The baseline so far was a reach with the gripper unused. Pick and place switches the
+gripper on, which needed one real fix:
 
-1. **Simulation only. Never command the physical arm.** The real driver and Gazebo expose
-   the same topic and action names, so a command sent while both are up reaches both.
-   Use a ROS domain of your own in every terminal (`export ROS_DOMAIN_ID=42`), and before
-   any command that moves the robot confirm all three:
+- **Gripper penalty.** lerobot's `GripperPenaltyProcessorStep` reads the last action
+  number as a gripper joint target; here it is the command itself (0 close, 1 stay,
+  2 open). Used as-is it would have penalised every "stay" step taken with the gripper
+  open. `hilserl_gen3_lite/env.py` has its own step: the environment reports when a
+  command changes what the gripper is asked to do, and that step gets `gripper_penalty`
+  (-0.02). Holding the close button while the fingers travel is one toggle, not ten (in
+  Gazebo the fingers took 1.4 s to close; each demo had exactly two penalised steps).
+  The penalty goes where upstream puts it: `complementary_info["discrete_penalty"]`,
+  added to the reward of the discrete gripper critic only.
+- **Configs.** `config/hilserl/env_gen3_lite_cup.json` (workspace setup, record) and
+  `train_gen3_lite_cup.json` (learner, actor): gripper on in the robot, the teleop and the
+  processor; `num_discrete_actions: 3`; 20 s episodes; 8 s between episodes to put the cup
+  back; 20 demos; replay buffers capped at 50 000 online and 20 000 offline transitions
+  (about 200 kB each with one 128x128 image, so up to 14 GB of RAM); a checkpoint every
+  20 000 optimisation steps (each one writes both buffers out as video datasets, which
+  stalls the learner for a while).
+- **Frozen orientation.** Every command holds one tool orientation: the start pose's.
+  It used to be whatever the tool had when control resumed; it is now the same exact
+  orientation in every episode, and a step that would turn the tool more than 0.03 rad
+  is not sent.
+- **No-go boxes.** `env.robot.no_go_boxes`: axis-aligned boxes in the base frame that no
+  moving link, fingers included, may come within 2 cm of (`no_go_margin`). They are
+  checked by the workspace guard with the collision meshes, next to the table plane and
+  self-collision; a command that would violate one is replaced by a hold.
+- **`hilserl_gen3_lite.workspace`**: the interactive setup for all of the above (step 3).
+  The operator drives the arm, teaches the tool box by sweeping it, the no-go boxes by
+  marking points, turns the gripper to the orientation the grasp needs, tries the walls
+  out live, and saves into both config files.
+- **`dryrun_cup_*.json`**: the same pipeline on the fake arm with a scripted operator.
 
-   ```bash
-   ros2 topic list | grep -x /clock                      # present: a simulator is publishing time
-   ros2 param get /controller_manager use_sim_time       # True
-   pgrep -af robot_ip                                    # nothing: no real-arm launch running
-   ```
+lerobot's convention, which the configs follow: the `action` feature has shape `[3]` (the
+continuous x, y, z), the gripper is a separate discrete head, and stored actions carry
+its index as a fourth number.
 
-   If you cannot establish that the physical arm is unreachable from your domain, stop
-   and ask.
-2. `gen3_lite_hil` refuses to move without `--run.confirm_motion=true`, in Gazebo too.
-   Passing it is fine once rule 1 is satisfied. Do not weaken that gate.
-3. Out of scope, as in the original brief: the SAC losses, the batch sampling ratios, the
-   network architecture, the lerobot version, the ROS package layout, controller gains.
-4. Do not change the default limits in `Gen3LiteHilConfig`. Anything Gazebo needs
-   loosened goes in `config/hilserl/gazebo_*.json` or on the command line.
-5. A fix to the adapter or the glue comes with a test (`tests/`, pytest, no hardware).
-6. Do not commit or push unless asked. Report failures with their output; a stage that
-   fails is a result, not something to work around quietly.
+## The session
 
-## What I do not know about that machine
-
-Check these before anything else; several of the commands below assume them.
-
-- **ROS distro.** This branch (`ros2_ubuntu24_04`) targets Jazzy on Ubuntu 24.04 with
-  Python 3.12. If the machine is Ubuntu 26.04 / Lyrical (Python 3.14, branch
-  `ros2_ubuntu26_04`), stop and report: lerobot 0.6.1 with the `hilserl` extra has not
-  been tried on 3.14.
-- **Kortex workspace.** `gen3_lite_env.sh` expects `/opt/ros/jazzy`, a built
-  `~/workspace/ros2_kortex_ws` (override with `KORTEX_WS`) and a conda env
-  `lerobot-ros-06` (override with `LEROBOT_ENV`). `docs/GEN3_LITE_DAGGER.md` describes
-  that setup and a Gazebo smoke test already done with it.
-- **NVIDIA driver.** `docs/GEN3_LITE_DAGGER.md` notes that pip pulls a CUDA torch that
-  needs driver 580 or newer, and that on one earlier occasion the kernel had no NVIDIA
-  module loaded. `nvidia-smi` and `torch.cuda.is_available()` settle it.
-- **3080 memory** (10 or 12 GB). Irrelevant for the state-only Gazebo run; it matters for
-  the real config (batch 256, 128x128 images).
-- **A display.** Without one, Gazebo has to run headless (`-s`); the DAgger doc did that
-  with a scratch copy of `kortex_sim_control.launch.py`.
-
-## Stages
-
-Do them in order. Each has a pass criterion; stop and report at the first failure you
-cannot fix within the rules.
-
-### A. Environment
+### 0. Before the arm moves (you)
 
 ```bash
-. gen3_lite_env.sh && export ROS_DOMAIN_ID=42
+. gen3_lite_env.sh
+pip install "lerobot[hilserl,dataset,training]==0.6.1" pin pytest
+pip install -e . -e lerobot_robot_ros -e lerobot_teleoperator_devices
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv
 python -c "import rclpy, torch, lerobot; print(lerobot.__version__, torch.__version__, torch.cuda.is_available())"
-pip install "lerobot[hilserl,dataset,training]==0.6.1" pin pytest      # if not already there
-pip install -e . -e lerobot_robot_ros -e lerobot_teleoperator_devices
 python -m pytest
+free -g
 ```
 
-Pass: lerobot 0.6.1, CUDA available, 64 tests pass. One test is skipped unless the
-kortex meshes are found; point `KORTEX_DESCRIPTION_PARENT` at the directory containing
-`kortex_description/` (the source tree, or the installed `share/`) so it runs.
-
-### B. Fake arm on the GPU
-
-No ROS involved. This is the first time CUDA and `torch.compile` are exercised, so do
-not set `TORCH_COMPILE_DISABLE`.
+Then rehearse the cup pipeline on the fake arm, on the GPU, without
+`TORCH_COMPILE_DISABLE` (this is the first time CUDA and `torch.compile` run):
 
 ```bash
-python -m hilserl_gen3_lite.record  --config_path=config/hilserl/dryrun_env.json
-python -m hilserl_gen3_lite.learner --config_path=config/hilserl/dryrun_train.json \
-    --policy.device=cuda --run.dir=runs/dryrun_gpu &
-python -m hilserl_gen3_lite.actor   --config_path=config/hilserl/dryrun_train.json \
-    --policy.device=cuda --run.dir=runs/dryrun_gpu \
-    --run.eval_interval_steps=150 --run.eval_episodes=3 --run.announce=false
-python -m hilserl_gen3_lite.summarize_run runs/dryrun_gpu
+python -m hilserl_gen3_lite.record  --config_path=config/hilserl/dryrun_cup_env.json
+python -m hilserl_gen3_lite.learner --config_path=config/hilserl/dryrun_cup_train.json \
+    --policy.device=cuda --run.dir=runs/dryrun_cup_gpu &
+python -m hilserl_gen3_lite.actor   --config_path=config/hilserl/dryrun_cup_train.json \
+    --policy.device=cuda --run.dir=runs/dryrun_cup_gpu --run.eval_enabled=false --run.announce=false
+python -m hilserl_gen3_lite.summarize_run runs/dryrun_cup_gpu
 ```
 
-The actor exits after 600 steps; the learner never exits on its own, so send it SIGINT
-afterwards. Pass: `episodes.csv`, `train.csv`, `eval.csv`, `run_meta_*.json` exist and
-`train.csv` has rows. Evaluation success reads 0 in this config because its scripted
-operator takes over in every episode, which counts an evaluation episode as failed; look
-at the `success` column of the training episodes instead. On the laptop CPU this run
-reached policy-only successes in six steps by episode 35.
+The actor exits by itself after 600 steps; stop the learner with Ctrl+C. Pass: tests
+green, CUDA available, `runs/dryrun_cup_gpu/train.csv` has rows with the
+`loss_discrete_critic` column filled in, and the training episodes succeed (the scripted
+operator drives most of each one). If the machine is Ubuntu 26.04 / Lyrical rather than
+Jazzy, or the kortex workspace is missing, stop and report: this branch assumes the setup
+in `docs/GEN3_LITE_DAGGER.md`.
 
-### C. The adapter over ROS, without Gazebo
+### 1. Camera (you, with the operator placing it)
 
 ```bash
-python tests/ros_check/fake_driver.py 22 &
-python tests/ros_check/check.py tests/fixtures/gen3_lite.urdf
+lerobot-find-cameras opencv
 ```
 
-Nothing else may be publishing `/joint_states` in your domain. Pass: last line
-`ROS CHECK PASSED`. This passed in a Jazzy container on the laptop; it is here to catch
-an environment difference before Gazebo adds its own.
+Put the device and resolution under `env.robot.cameras.front` in **both** cup configs.
+The name `front` is already wired through the features and the policy; keep it. The
+entry there now is a placeholder (index 0, 640x480, 30 fps).
 
-### D. Gazebo: bring-up and the smoke test
+A head-on camera is fine for this task. The policy gets the arm's own position in all
+three axes from proprioception, so it does not need the image to know how far it has
+reached. What the image has to supply is what proprioception cannot: where the cup is
+and whether it is in the gripper. With the cup starting on a fixed mark, a head-on view
+shows its left-right and up-down position well, and the remaining uncertainty (a
+centimetre or so of depth each time it is put back) lies along the camera axis. Keep in
+mind what that view cannot do, so nobody is surprised later:
 
-Terminal 1 (leave running):
+- It cannot tell the policy how far away the cup is if the cup's start position is
+  varied in depth; apparent size is a weak cue at 128x128. Vary the cup position only
+  sideways, or add a second view, when the task gets there.
+- If the gripper approaches straight along the camera axis, the cup can hide the
+  fingers from the camera just before the grasp.
+
+Practical points: fix exposure, white balance and focus if the camera allows it; do not
+move the camera, the lights or the table after the demos are recorded; keep the
+operator's hands out of frame or always in the same place. The camera and its mount are
+rigid objects near the arm: they get a no-go box in step 3.
+
+### 2. Smoke test (operator)
+
+Driver up, arm homed, table clear.
 
 ```bash
-. gen3_lite_env.sh && export ROS_DOMAIN_ID=42
-ros2 launch kortex_bringup kortex_sim_control.launch.py \
-    use_sim_time:=true launch_rviz:=false robot_type:=gen3_lite dof:=6 gripper:=gen3_lite_2f
+python -m hilserl_gen3_lite.smoke_test --robot.type=gen3_lite_hil --run.confirm_motion=true
 ```
 
-Terminal 2, after the rule 1 checks and `ros2 control list_controllers` shows
-`joint_trajectory_controller` and the gripper controller active:
+3 cm out and back on each axis around a pose with the tool at (0.30, 0.16, 0.22) m, a
+timing check and a watchdog check. Keep the whole output. For comparison, in Gazebo:
+loop period 100.2 ms with 0.7 ms worst deviation, lag 18–21 mm on the third step of a
+leg, 0.3–1.8 mm error after settling. A `FAIL` on the 8 mm settling tolerance on the real
+arm is information about the arm, not necessarily a bug: report the numbers.
 
-```bash
-mkdir -p runs
-python -m hilserl_gen3_lite.smoke_test --robot.type=gen3_lite_hil \
-    --robot.use_sim_time=true --run.confirm_motion=true 2>&1 | tee runs/gazebo_smoke.txt
-```
-
-It homes with the guarded joint move, goes to the reset pose (tool at 0.30, 0.16,
-0.22 m), idles 3 s, drives 3 cm out and back on each axis printing commanded against
-measured tool position per step, checks the watchdog, and prints `SMOKE TEST PASSED` or
-`FAILED` with counters. Pass: `PASSED`. Whatever the verdict, keep the full output: the
-per-step error column is the first real measurement of tracking lag.
-
-How to read failures:
-
-| Symptom | Likely cause | What to do |
-|---|---|---|
-| `StaleObservationError: Joint state is N ms old` | The age is wall-clock time since the last `/joint_states` message; Gazebo below real time stretches it past 200 ms | Check the real-time factor. For simulation only, add `--robot.max_obs_age_s=1.0`. Report the factor and the ages printed by the idle loop. |
-| Arm does not move, no error | Controller rejected the goals, or `joint_trajectory_controller` is not active | `ros2 control list_controllers`; the driver terminal's log. `docs/LYRICAL_KINOVA.md` §7.1 describes a joint-limit case that deactivates it. |
-| `Move stopped: the workspace guard blocked the straight joint path` | Homing or the move to the reset pose crosses the table plane, the guard box or a self-collision margin | Note the start pose and the guard's reason. The sim spawns the base about 5 cm above the ground; the guard's plane is at the base's bottom face. |
-| `FAIL: tracking error above 8 mm` after settling | Real lag or steady-state error | Report the numbers. The tolerance was a guess; do not just raise it. |
-| Error column grows during a leg and `lead_clipped` steps appear (`clipped commands` counter) | Lag reaching the 3 cm lead limit at 0.1 m/s | Report. Each goal is due 0.2 s out (`action_time_from_start_sec`), so about 2 cm of lag was expected. |
-| `IK rejected a step` | Target unreachable with the held orientation | Report the pose. It should not happen inside the default box near the reset pose. |
-| `FAIL: loop period deviates` | The step path is slow: the guard's mesh check alone is about 21 ms (`docs/GEN3_LITE_DAGGER.md`) | Report mean and worst period. |
-| Guard construction fails at connect | `gen3_lite_gen3_lite_2f.xacro` does not expand in this kortex checkout (it failed in one checkout on the laptop) | `--robot.urdf_path=<a generated URDF>`; report which kortex commit. |
-
-Also record, once: `ros2 topic hz /joint_states`, and whether
+Also once, with the driver up: `ros2 topic hz /joint_states`, and whether
 `ros2 topic echo --once /joint_states` shows non-zero velocities while the arm moves.
 
-### E. Gazebo: the full loop, unattended
-
-There is no camera in the kortex Gazebo world and nobody to hold a gamepad, so
-`config/hilserl/gazebo_env.json` and `gazebo_train.json` use a state-only policy (the
-10-number state, no image encoder) and the scripted operator (`--teleop.type=scripted_ee`).
-It drives the tool towards a target 7.5 cm from the reset pose, takes over on steps 10–39
-of each of the first 40 episodes, then keeps its hands off, and reports success when the
-tool is within 1.5 cm of the target. Everything else matches the real-arm config.
+### 3. Workspace setup: orientation, bounds, no-go boxes, start pose (operator)
 
 ```bash
-python -m hilserl_gen3_lite.record --config_path=config/hilserl/gazebo_env.json --run.confirm_motion=true
-
-python -m hilserl_gen3_lite.learner --config_path=config/hilserl/gazebo_train.json \
-    --run.dir=runs/gazebo_reach_s0                                   # terminal A
-
-python -m hilserl_gen3_lite.actor --config_path=config/hilserl/gazebo_train.json \
-    --run.dir=runs/gazebo_reach_s0 --run.confirm_motion=true \
-    --run.eval_interval_steps=500 --run.eval_episodes=5 --run.announce=false   # terminal B
-
-python -m hilserl_gen3_lite.summarize_run runs/gazebo_reach_s0
+python -m hilserl_gen3_lite.workspace --config_path=config/hilserl/env_gen3_lite_cup.json \
+    --run.confirm_motion=true
 ```
 
-4000 environment steps, roughly 10–15 minutes. Stop the learner with SIGINT when the
-actor exits. A run directory cannot be reused by the learner; use a new name per run.
+Nothing is recorded. The arm homes, moves to the configured start pose, and then only
+moves while the takeover button is held, or when a turn command is typed. The operator
+drives with the gamepad and types short commands in the terminal; everything taught takes
+effect at once, so it can be tried out before it is saved. `help` lists the commands; the
+docstring of `hilserl_gen3_lite/workspace.py` describes them.
 
-Pass, plumbing: the run completes; no `StaleObservationError`, no IK rejections; the
-actor log has no `Policy FPS ... below required` warnings beyond the first steps;
-`train.csv` shows both buffers growing and all three batch shares non-zero.
+**First, the gamepad.** lerobot's mapping (pygame numbers; they vary by controller, so
+confirm each one before going further; an empty line prints the tool position, the
+joints and the gripper):
 
-Pass, behaviour: in the early episodes the takeover finishes the reach (success 1,
-`takeovers` 1); later, episodes succeed with `intervention_steps` 0; evaluation success
-rises across blocks. **This is not guaranteed.** The state-only reach has not been tuned,
-and 500 steps on the fake arm were not enough for it. If it has not learned by 4000
-steps, try `--policy.online_steps=15000` once before concluding anything, and report the
-curves either way. Do not start adjusting learning rates, the discount or the
-temperature: that is the learner, and it is out of scope.
+| Control | pygame | Effect |
+|---|---|---|
+| Takeover | button 5 (RB on most pads) | the human drives while it is held |
+| Left stick | axes 0, 1 | y, x |
+| Right stick, vertical | axis 3 | z |
+| Close gripper | button 6 | closes while held, then stays closed |
+| Open gripper | button 7 | opens while held, then stays open |
+| Success | button 3 (Y) | in this tool: marks a point. Later: reward 1, episode ends |
+| Failure | button 1 | episode ends |
+| Re-record | button 0 | discards the demo being recorded |
 
-Look through the actor's log (`runs/gazebo_reach_s0/actor_*/logs/`) for counts of
-`Watchdog:`, `Workspace guard blocked`, `IK rejected` and `clamped`. One watchdog hold
-per episode end is expected and harmless: the actor pauses to push transitions and load
-weights, the 0.3 s watchdog fires, the environment then resets.
+**Then, in this order:**
 
-### F. Not in this pass
+1. **Orientation** (`yaw DEG`, `pitch DEG`, `roll DEG`). The policy cannot turn the tool,
+   so the orientation chosen here is the one the whole task is done in. The configured
+   start pose has Kinova home's orientation: gripper level, pointing 60 degrees to the
+   left of straight ahead (not straight ahead, whatever older notes say). At the
+   configured position a level gripper can turn only about 26 degrees further towards
+   straight ahead before the elbow joint reaches its limit; pointing straight down
+   (`pitch 90`) is reachable. Turns go at 15 degrees per second through every limit, and
+   stop with a message where the arm cannot follow. Decide between a side grasp and a
+   top-down grasp with the cup in place.
+2. **Start pose** (`r`) with the arm where episodes should begin. It warns if a joint is
+   close to its limit there; believe it and pick another pose.
+3. **Tool box** (`w`, drive, `done`): sweep the tool through everything the task needs:
+   the pick spot, the place spot, the top of the carry, the lowest point of the grasp. Do
+   the whole task by hand a couple of times while it records. The box is what was swept
+   plus 2 cm. A smaller box learns faster and is safer; do not keep slack "just in case".
+4. **No-go boxes** (`n NAME`, mark points with the success button, `done`; or
+   `n NAME x0 y0 z0 x1 y1 z1` from a tape measure) around the camera and its mount and
+   anything else rigid within reach. Bring the tool tip near the extremes of the object,
+   not onto it; stop two or three centimetres short. The box is the marked points plus
+   3 cm, and every link then stays 2 cm clear of it. The table needs no box (it is the
+   guard's plane) and neither does the arm itself.
+5. **Try it**: drive at each wall of the tool box (the tool stops there) and towards each
+   no-go box (the arm holds, and the log says which link and which box). Do the task by
+   hand once more inside the final box, with the real cup: reach, grasp, lift, carry, set
+   down, release. `show` prints the settings and writes `runs/workspace.png`, a top and a
+   side view; look at it together.
+6. **`save`**, which writes `ee_bounds_min/max`, `no_go_boxes` and
+   `reset_joint_positions` under `env.robot` in both cup configs and refuses if either
+   file would no longer load. Then `quit`.
 
-Images in simulation (needs a camera added to the Gazebo world), the reward classifier,
-`crop_dataset_roi`, wandb, resuming a learner run, and anything on the physical arm.
-Say so if one of them turns out to block a stage above.
+Afterwards (you): `python -m pytest tests/test_configs.py`, and read the saved values
+back to the operator. Things that go wrong here:
+
+- **The box does not contain the grasp.** The guard box's floor is z = 0.02 m above the
+  bottom of the arm's base; the earlier DAgger work grasped a cup with the tool at
+  z = 0.065 m. If the tool cannot get low enough, or `Workspace guard blocked` names the
+  table plane, report where rather than editing the guard.
+- **The grasp itself.** Watch the gripper number while holding the cup: it should stall
+  partway, where the cup stops the fingers. If a full close crushes the cup, lower
+  `env.robot.ros2_interface.gripper_close_position` in both configs.
+- **Fingers reach further than the tool point.** With the gripper open a fingertip is
+  about 6 cm ahead of the tool position that is printed. The tool box limits the tool
+  point; the no-go boxes and the table plane are what keep the fingers off things.
+
+### 4. Decide the task details (operator; write them down)
+
+- Cup start: one marked spot for the first run. A single fixed camera gives the policy
+  little to locate a cup that moves around.
+- Place target: a second mark, 10 to 20 cm away, inside the box.
+- Success, exactly: for example "cup upright on the mark and the gripper open". The
+  operator presses the success key at the same moment every time; reward is given on
+  that step only.
+- Failure or timeout: let the 20 s run out, or press the failure key.
+
+### 5. Demos (operator)
+
+```bash
+python -m hilserl_gen3_lite.record --config_path=config/hilserl/env_gen3_lite_cup.json \
+    --run.confirm_motion=true
+```
+
+20 episodes into `data/gen3_lite_cup_hil_demos`. The arm stays still unless takeover is
+held. Between episodes the arm opens the gripper and returns to the reset pose, then
+waits out the rest of 8 s for the cup to be put back. If an episode ends with the cup
+still in the gripper, it is dropped where the arm is when the reset starts.
+
+Afterwards (you): check the dataset has 20 episodes, each ending with reward 1, and that
+`complementary_info.discrete_penalty` is -0.02 on exactly two frames of a clean demo.
+
+### 6. Crop (you prepare, operator draws)
+
+```bash
+python -m lerobot.rl.crop_dataset_roi --repo-id local/gen3_lite_cup_hil_demos \
+    --root data/gen3_lite_cup_hil_demos
+```
+
+Upstream's tool; it needs a display. Put the printed `crop_params_dict` into
+`env.processor.image_preprocessing` in both configs and point `dataset` in the train
+config at the cropped copy it writes. It has not been run in this project, so check the
+cropped dataset still has the `complementary_info.*` columns; if not, skip the crop for
+the first run (full frames are resized to 128x128) and report it.
+
+### 7. Train
+
+Terminal A (you may start this one):
+
+```bash
+python -m hilserl_gen3_lite.learner --config_path=config/hilserl/train_gen3_lite_cup.json \
+    --run.dir=runs/cup_baseline_s0
+```
+
+Terminal B (operator), once the learner prints `gRPC server started`:
+
+```bash
+python -m hilserl_gen3_lite.actor --config_path=config/hilserl/train_gen3_lite_cup.json \
+    --run.dir=runs/cup_baseline_s0 --run.confirm_motion=true \
+    --run.eval_interval_steps=5000 --run.eval_episodes=10
+```
+
+Stop with Ctrl+C in the actor, then the learner. The actor holds and disconnects the arm
+and logs `robot limit counters: {...}` as it exits.
+
+- **Evaluation blocks** cost operator time: 10 episodes of up to 28 s each. Every 5000
+  steps that is about a quarter of the session; at the default of 2000 it would be half.
+  During a block the operator keeps hands off, takes over only for safety (that episode
+  then counts as a failure), and still presses the success key.
+- **How long:** unknown. The HIL-SERL paper reports one to two and a half hours for its
+  tasks, on different hardware and with wrist cameras. Do not promise a number.
+- **Operator notes** (from the paper and its follow-ups): intervene often early, then
+  less; give short, specific corrections and let the robot explore otherwise; do not
+  drive whole episodes to success by hand, which inflates the critic's values.
+
+While it runs (you): watch `runs/cup_baseline_s0/episodes.csv` and `train.csv`, the
+actor's log for `Policy FPS ... below required`, `Workspace guard blocked`,
+`IK rejected` and `StaleObservationError`, and the machine's free memory.
+
+### 8. Afterwards (you)
+
+```bash
+python -m hilserl_gen3_lite.summarize_run runs/cup_baseline_s0
+```
 
 ## Things I would look at first if something is off
 
-- **Stop-go motion.** Each command is a trajectory point that ends at rest 0.2 s out.
-  The backend has an opt-in smoother (`stream_velocities`, with
-  `config/gen3_lite_ros2_controllers_streaming.yaml`). Leave it off for the baseline;
-  describe the motion you see.
-- **Stored action against executed motion.** The buffer stores the action the policy or
-  human asked for; the adapter may have shortened it at a limit. That matches upstream,
-  whose bounds step also clips after the action is chosen. A policy pressed against the
-  box will show up as `clipped commands` climbing.
-- **Episode length** is `control_time_s x fps - 1` steps (upstream's time limit counts
-  the reset observation). The scripted operator's `episode_steps` must equal it, or its
-  takeover window drifts from episode to episode.
-- **Shutdown.** The upstream actor does not disconnect the robot when it exits; the
-  watchdog's hold is what stops the arm. Confirm in Gazebo that the arm is stationary
-  after the actor ends, including after Ctrl+C mid-episode.
-- **Reset** opens the gripper on every homing move (inherited from `Gen3LiteRos.go_home`).
-  Harmless for a reach.
-- **Upstream quirks already worked around** are listed in GEN3_LITE_HILSERL.md under
-  "What the upstream code could not do as-is": the motor-bus environment, the config
-  serialisation crash, and the replay buffer dropping `is_intervention`.
+- **Arm does not move, no error.** `ros2 control list_controllers`: the trajectory
+  controller must be active. A joint outside its URDF limit at start-up deactivates it
+  (`docs/LYRICAL_KINOVA.md` §7.1); home the arm and relaunch the driver.
+- **`StaleObservationError`.** Joint state or a camera frame older than 200 ms. Check the
+  rates before raising `max_obs_age_s`; a camera that cannot hold 10 Hz is a problem for
+  learning too.
+- **The arm lags or the tool path wobbles.** At 0.1 m/s the arm runs about 2 cm behind
+  its target, and the per-joint cap (0.1 rad from the measured position) acts on about a
+  third of all commands. That was the source of two bugs found in Gazebo; read the
+  paragraph under the limits table in GEN3_LITE_HILSERL.md before touching
+  `Gen3LiteHil.send_action`.
+- **Counters.** `step_clipped_commands` is high by design: any diagonal unit action is
+  longer than 1 cm and is scaled back. `box_clipped_commands` climbing means the policy
+  is pressing against the tool box. `guard_blocks` means it is pressing against a no-go
+  box or the table (the log line names which); a few are normal, a steady stream means
+  the tool box overlaps something it should not. `ik_rejections` in numbers mean the box
+  reaches somewhere the arm cannot go with the frozen orientation.
+- **Gripper never moves on the real arm.** On Jazzy it is `control_msgs/GripperCommand`
+  on `/gen3_lite_2f_gripper_controller/gripper_cmd`. `Gripper action server not
+  available` in the log means the controller is not up.
+- **Images.** `compat.py` rescales demo images for the offline buffer. If learning from
+  the demos looks far worse than expected, check the image range in a sampled batch from
+  both buffers before anything else.
+- **Upstream quirk, not ours to fix.** With `utd_ratio: 2`, upstream's final update of
+  each step drops `complementary_info`, so the gripper penalty reaches the discrete
+  critic in half of its updates.
+- **Memory and disk.** Both buffers live in RAM; each checkpoint also writes them to disk
+  as video.
 
 ## What to hand back
 
-1. Machine facts: OS, ROS distro, GPU and driver, torch version, kortex commit.
-2. Per stage A–E: passed, failed or skipped, with the command and the relevant output.
-3. From D: the smoke-test output, `/joint_states` rate, Gazebo's real-time factor, and
-   the tracking error after settling and at its worst during a leg.
-4. From E: `summary.json`, `curves.png`, the two rise-time numbers, and the warning counts.
-5. Every code or config change you made, each with its reason and its test.
-6. What you verified by running it, separately from what you inferred.
-7. Anything that suggests the default limits are wrong for the real arm. Flag it; do not
-   change the defaults.
+1. Machine facts: OS, ROS distro, GPU and driver, RAM, torch version, kortex commit, the
+   camera model and where it ended up.
+2. Each step above: done, failed or skipped, with the command and the relevant output.
+3. The smoke-test output, the `/joint_states` rate and whether it carries velocities.
+4. The final configs (orientation, bounds, no-go boxes, start pose, camera, crop),
+   `runs/workspace.png`, and how success was defined.
+5. From the run: `summary.json`, `curves.png`, the two rise-time numbers, the final
+   counters line, session length in steps and minutes, and the operator's impression of
+   how the takeovers went.
+6. Every code or config change, each with its reason and its test.
+7. What you verified by running it, separately from what you inferred.
+8. Anything suggesting the default limits are wrong for this arm. Flag it; do not change
+   the defaults.
+
+## If you want the simulator after all
+
+`docker/gazebo/` runs a simulated Gen3 Lite with the real controllers in a container
+with no network (see its README): `docker/gazebo/run.sh up`, then
+`docker/gazebo/run.sh exec '<command>'`. `config/hilserl/gazebo_*.json` is the state-only
+reach used on the laptop. It is the quickest way to reproduce an adapter problem without
+the arm.
 
 ## Map
 
 | Path | What |
 |---|---|
-| `docs/GEN3_LITE_HILSERL.md` | Design, limits, log formats, the real-arm run book, verified / not verified |
+| `docs/GEN3_LITE_HILSERL.md` | Design, limits, log formats, verified / not verified, Gazebo results |
+| `config/hilserl/*_gen3_lite_cup.json` | This task. `*_gen3_lite_reach.json`: the gripper-less reach. `dryrun_*`: fake arm |
 | `lerobot_robot_ros/lerobot_robot_ros/gen3_lite_hil.py`, `ee_delta.py`, `config_gen3_lite_hil.py` | The robot class, the step limiter and kinematics, the limits |
-| `lerobot_robot_ros/lerobot_robot_ros/gen3_lite_ros.py`, `lerobot_backends/ros2/` | The joint-space path underneath: step cap, workspace guard, ROS interface |
-| `hilserl_gen3_lite/env.py` | Gym environment and processor pipelines |
-| `hilserl_gen3_lite/{actor,learner,record}.py` | Entry points wrapping upstream; `compat.py` is the one in-memory upstream fix |
-| `hilserl_gen3_lite/smoke_test.py`, `summarize_run.py` | Stage D and the run summary |
-| `config/hilserl/` | `gazebo_*` (this pass), `dryrun_*` (fake arm), `*_gen3_lite_reach` (real arm; cameras are placeholders) |
-| `tests/`, `tests/ros_check/` | 64 hardware-free tests; the ROS check of stage C |
-| `docs/GEN3_LITE_DAGGER.md`, `docs/LYRICAL_KINOVA.md` | Earlier bring-up notes, including a Gazebo run of the joint-space robot |
+| `hilserl_gen3_lite/env.py` | Gym environment, processor pipelines, the gripper penalty step |
+| `hilserl_gen3_lite/{workspace,smoke_test,record,actor,learner}.py` | The commands of this session |
+| `lerobot_backends/ros2/workspace_guard.py` | Table plane, guard box, no-go boxes, self-collision |
+| `hilserl_gen3_lite/compat.py` | The two in-memory fixes to lerobot 0.6.1 |
+| `tests/` | 92 hardware-free tests |

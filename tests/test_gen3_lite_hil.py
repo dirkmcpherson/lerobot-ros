@@ -73,6 +73,10 @@ def test_oversized_action_is_clipped(make_robot):
     act(robot, x=50.0, y=50.0, z=50.0)
     assert np.linalg.norm(tool(robot) - start) <= 0.01 + 2e-4
     assert robot.clipped_commands == 1
+    assert robot.counters() == {
+        "clipped_commands": 1, "step_clipped_commands": 1, "lead_clipped_commands": 0, "box_clipped_commands": 0,
+        "joint_capped_commands": 0, "guard_blocks": 0, "ik_rejections": 0, "stale_stops": 0, "watchdog_trips": 0,
+    }
     assert robot.last_report.action_clipped and robot.last_report.step_clipped
 
 
@@ -104,7 +108,64 @@ def test_random_policy_stays_inside_the_tool_box(make_robot):
         assert np.all(now >= np.array(cfg.ee_bounds_min) - 5e-4), now
         assert np.all(now <= np.array(cfg.ee_bounds_max) + 5e-4), now
         prev = now
-    assert robot.clipped_commands > 0
+    assert robot.box_clipped_commands > 0 and robot.step_clipped_commands > 0
+
+
+def test_per_joint_cap_shortens_what_is_sent_but_the_path_stays_straight(make_robot):
+    """Found in Gazebo: with the arm ~2 steps behind its target, the 0.1 rad per-joint cap
+    (against the measured joints) binds. What is sent is shortened and counted, but the
+    reference stays on the intended line, so the arm ends where it was told to go instead
+    of drifting sideways a little on every capped step."""
+    robot = make_robot(max_relative_target=0.004)  # a tight cap stands in for the lag
+    start = tool(robot)
+    for _ in range(3):
+        act(robot, x=1.0)
+        time.sleep(0.1)
+    assert robot.joint_capped_commands == 3 and robot.clipped_commands == 0
+    assert tool(robot)[0] < start[0] + 0.025  # the cap really did hold the arm back
+    for _ in range(100):  # zero actions: the arm catches up with the reference
+        act(robot)
+    np.testing.assert_allclose(tool(robot), start + [0.03, 0, 0], atol=3e-4)
+
+
+def test_capped_commands_stay_on_the_line(make_robot, kinematics):
+    """Found in Gazebo: clamping each joint separately gives a pose that is off the
+    intended line (the tool was commanded 2 cm outside its box and the guard stopped it).
+    The whole joint step is scaled instead, so every command sent stays on the line."""
+    robot = make_robot(max_relative_target=0.004)
+    start = tool(robot)
+    worst = 0.0
+    for i in range(40):
+        act(robot, x=1.0 if i < 6 else 0.0, z=1.0 if i < 6 else 0.0)
+        sent = robot.backend.sent[-1]
+        pos, _ = kinematics.fk([sent[f"joint_{j}.pos"] for j in range(1, 7)])
+        offset = pos - start
+        along = np.array([1.0, 0.0, 1.0]) / np.sqrt(2)
+        worst = max(worst, float(np.linalg.norm(offset - along * (offset @ along))))
+        time.sleep(0.05)
+    assert robot.joint_capped_commands > 5
+    # Not exactly zero: a straight joint-space segment between two poses up to 3 cm apart
+    # (the lead limit) bows away from the straight tool-space line by under a millimetre.
+    assert worst < 1.5e-3, f"a capped command was {worst * 1e3:.2f} mm off the commanded line"
+
+
+def test_ik_solution_that_jumps_is_rejected(make_robot):
+    robot = make_robot(ik_max_joint_step_rad=1e-4)  # any real step counts as a jump
+    joints = robot.backend.joints.copy()
+    act(robot, x=1.0)
+    assert robot.ik_rejections == 1
+    np.testing.assert_allclose(robot.backend.joints, joints, atol=1e-9)
+
+
+def test_reference_cannot_run_away_from_a_capped_arm(make_robot):
+    robot = make_robot(max_relative_target=0.002)
+    lead_clips = 0
+    for _ in range(15):
+        act(robot, x=1.0)
+        lead_clips += robot.last_report.lead_clipped
+        assert np.linalg.norm(robot._ref_pos - tool(robot)) <= robot.config.max_ee_lead_m + 1e-6
+        time.sleep(0.1)
+    assert lead_clips > 0
 
 
 def test_ee_bounds_must_lie_inside_the_guard_box(urdf_path):
@@ -126,6 +187,41 @@ def test_non_finite_action_raises_and_sends_nothing(make_robot):
     with pytest.raises(ValueError):
         act(robot, x=float("nan"))
     assert len(robot.backend.sent) == sent
+
+
+# -------------------------------------------------------------------------- orientation
+
+
+def _angle(a, b):
+    return float(np.arccos(np.clip((np.trace(a.T @ b) - 1) / 2, -1, 1)))
+
+
+def test_orientation_is_frozen_at_the_reset_pose_not_at_where_the_arm_happens_to_be(make_robot, kinematics):
+    """Roll, pitch and yaw are frozen at the start pose's. An arm that arrives a little
+    off (homing tolerance, a pause mid-episode) is brought back to it, not left there."""
+    off = np.array(START_JOINTS) + [0, 0, 0, 0.04, 0, 0.05]  # wrist slightly turned
+    robot = make_robot(start_joints=off.tolist(), reset_joint_positions=START_JOINTS)
+    _, frozen = kinematics.fk(START_JOINTS)
+    start = tool(robot)
+    assert _angle(frozen, kinematics.fk(robot.backend.joints)[1]) > 0.03
+    for _ in range(3):
+        act(robot)
+    assert _angle(frozen, kinematics.fk(robot.backend.joints)[1]) < 2e-3
+    np.testing.assert_allclose(tool(robot), start, atol=5e-4)  # the tool did not travel
+    for _ in range(12):  # and it stays frozen while moving
+        act(robot, x=1.0, y=-0.5, z=0.5)
+        time.sleep(0.1)
+        assert _angle(frozen, kinematics.fk(robot.backend.joints)[1]) < 5e-3
+
+
+def test_far_from_the_frozen_orientation_the_wrist_is_not_swung_over(make_robot, kinematics):
+    turned = np.array(START_JOINTS) + [0, 0, 0, 0, 0, 0.6]
+    robot = make_robot(start_joints=turned.tolist(), reset_joint_positions=START_JOINTS)
+    before = robot.backend.joints.copy()
+    act(robot)
+    np.testing.assert_allclose(robot.backend.joints, before, atol=1e-6)  # holds what it has
+    act(robot, x=1.0)
+    assert _angle(kinematics.fk(turned)[1], kinematics.fk(robot.backend.joints)[1]) < 5e-3
 
 
 # ------------------------------------------------------------------------------ gripper

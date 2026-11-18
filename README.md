@@ -153,7 +153,8 @@ the robot class), lerobot's `gamepad` teleop for takeovers, and `hilserl_gen3_li
 entry points that wrap lerobot's unmodified learner and actor and log success rate,
 intervention rate and episode length against environment steps. Recon, run book and
 what has and has not been verified: [docs/GEN3_LITE_HILSERL.md](docs/GEN3_LITE_HILSERL.md).
-Testing it in Gazebo on a GPU machine: [docs/GEN3_LITE_HILSERL_HANDOFF.md](docs/GEN3_LITE_HILSERL_HANDOFF.md).
+Plan for the first real-arm session (pick and place a cup): [docs/GEN3_LITE_HILSERL_HANDOFF.md](docs/GEN3_LITE_HILSERL_HANDOFF.md).
+A simulated arm with the real controllers, in a container: [docker/gazebo/](docker/gazebo/README.md).
 
 ```bash
 python -m pytest                                                       # no hardware

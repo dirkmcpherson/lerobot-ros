@@ -74,6 +74,7 @@ def run(cfg: SmokeTestConfig) -> bool:
         robot.connect()
         reset = robot_cfg.reset_joint_positions or DEFAULT_RESET
         print(f"Moving to the reset pose {reset} (guarded joint move)...", flush=True)
+        robot.freeze_orientation_at(list(reset))
         robot.go_home(list(reset))
         start = tool(robot.get_observation())
         lo, hi = np.array(robot_cfg.ee_bounds_min), np.array(robot_cfg.ee_bounds_max)
@@ -145,11 +146,7 @@ def run(cfg: SmokeTestConfig) -> bool:
             ok = False
             print(f"FAIL: watchdog trips went from {trips} to {robot.watchdog_trips}, expected one more")
 
-        print(
-            f"\nCounters: clipped commands {robot.clipped_commands}, IK rejections {robot.ik_rejections}, "
-            f"guard blocks {robot.blocked_commands}, stale stops {robot.stale_stops}, "
-            f"watchdog trips {robot.watchdog_trips}"
-        )
+        print(f"\nLimit counters: {robot.counters()}")
         if robot.ik_rejections or robot.stale_stops:
             ok = False
             print("FAIL: IK rejections or stale observations occurred")
