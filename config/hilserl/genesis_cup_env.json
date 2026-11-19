@@ -1,0 +1,123 @@
+{
+  "env": {
+    "name": "real_robot",
+    "task": "genesis_cylinder_to_shelf",
+    "fps": 10,
+    "robot": {
+      "type": "gen3_lite_hil_genesis",
+      "use_gripper": true,
+      "fixed_gripper_position": null,
+      "control_period_s": 0.1,
+      "ee_step_size_m": 0.01,
+      "max_ee_step_m": 0.01,
+      "max_ee_speed_m_s": 0.1,
+      "ee_bounds_min": [
+        0.24,
+        0.04,
+        0.05
+      ],
+      "ee_bounds_max": [
+        0.4,
+        0.28,
+        0.24
+      ],
+      "watchdog_periods": 3.0,
+      "max_obs_age_s": 0.2,
+      "home_on_connect": false,
+      "cameras": {
+        "front": {
+          "type": "opencv",
+          "index_or_path": 0,
+          "fps": 10,
+          "width": 128,
+          "height": 128
+        }
+      },
+      "reset_joint_positions": [
+        0.323,
+        -0.356,
+        1.508,
+        1.571,
+        1.278,
+        -0.201
+      ]
+    },
+    "teleop": {
+      "type": "scripted_pick_place",
+      "grasp_dz": -0.015,
+      "episode_steps": 149,
+      "noise_std": 0.3,
+      "takeovers": [
+        [
+          10,
+          110
+        ]
+      ],
+      "max_takeover_episodes": 100,
+      "always_intervene": true,
+      "seed": 1
+    },
+    "processor": {
+      "control_mode": "gamepad",
+      "observation": {
+        "display_cameras": false
+      },
+      "image_preprocessing": {
+        "crop_params_dict": null,
+        "resize_size": [
+          128,
+          128
+        ]
+      },
+      "gripper": {
+        "use_gripper": true,
+        "gripper_penalty": -0.02
+      },
+      "reset": {
+        "reset_time_s": 1.0,
+        "control_time_s": 15.0,
+        "terminate_on_success": true,
+        "fixed_reset_joint_positions": null
+      },
+      "inverse_kinematics": null,
+      "reward_classifier": null,
+      "max_gripper_pos": null
+    },
+    "features": {
+      "observation.images.front": {
+        "type": "VISUAL",
+        "shape": [
+          3,
+          128,
+          128
+        ]
+      },
+      "observation.state": {
+        "type": "STATE",
+        "shape": [
+          10
+        ]
+      },
+      "action": {
+        "type": "ACTION",
+        "shape": [
+          3
+        ]
+      }
+    },
+    "features_map": {
+      "observation.images.front": "observation.images.front",
+      "observation.state": "observation.state",
+      "action": "action"
+    }
+  },
+  "dataset": {
+    "repo_id": "local/genesis_cup_demos",
+    "root": "data/genesis_cup_demos",
+    "task": "pick up the cylinder and place it on the shelf",
+    "num_episodes_to_record": 20,
+    "push_to_hub": false
+  },
+  "mode": "record",
+  "device": "cpu"
+}

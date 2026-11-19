@@ -6,3 +6,5 @@ from .config_spacemouse_joint import SpacemouseJointTeleopConfig
 from .spacemouse_joint import SpacemouseJointTeleop
 from .config_scripted_ee import ScriptedEeTeleopConfig
 from .scripted_ee import ScriptedEeTeleop
+from .config_scripted_pick_place import ScriptedPickPlaceTeleopConfig
+from .scripted_pick_place import ScriptedPickPlaceTeleop

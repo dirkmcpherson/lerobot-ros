@@ -5,3 +5,4 @@ from .gen3_lite_ros import Gen3LiteRos
 from .config_gen3_lite_hil import Gen3LiteHilConfig
 from .gen3_lite_hil import Gen3LiteHil, StaleObservationError
 from .fake_backend import FakeArmBackend, Gen3LiteHilFake, Gen3LiteHilFakeConfig
+from .gen3_lite_hil_genesis import Gen3LiteHilGenesis, Gen3LiteHilGenesisConfig
